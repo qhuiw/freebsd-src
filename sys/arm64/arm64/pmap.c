@@ -8226,7 +8226,7 @@ static int
 pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
     int mode, bool skip_unmapped)
 {
-	vm_offset_t base, offset, tmpva;
+	vm_offset_t base, offset, tmpva, tmpptep;
 	vm_size_t pte_size;
 	vm_paddr_t pa;
 	pt_entry_t pte, *ptep, *newpte;
@@ -8360,6 +8360,20 @@ pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
 				break;
 			}
 
+			tmpptep = 0;
+			if (tmpva <= (vm_offset_t)ptep &&
+			    tmpva + pte_size > (vm_offset_t)ptep) {
+				tmpptep = kva_alloc(PAGE_SIZE);
+				if (tmpptep == 0)
+					return (EINVAL);
+
+				pmap_kenter(tmpptep, PAGE_SIZE,
+				    DMAP_TO_PHYS((vm_offset_t)ptep) &~L3_OFFSET,
+				    VM_MEMATTR_WRITE_BACK);
+				ptep = (pt_entry_t *)(tmpptep +
+				    ((vm_offset_t)ptep & PAGE_MASK));
+			}
+
 			/* Update the entry */
 			pte = pmap_load(ptep);
 			pte &= ~mask;
@@ -8384,6 +8398,11 @@ pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
 				pmap_update_entry(kernel_pmap, ptep, pte, tmpva,
 				    PAGE_SIZE);
 				break;
+			}
+
+			if (tmpptep != 0) {
+				pmap_kremove(tmpptep);
+				kva_free(tmpptep, PAGE_SIZE);
 			}
 
 			pa = PTE_TO_PHYS(pte);
