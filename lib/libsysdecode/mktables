@@ -165,6 +165,13 @@ gen_table "sctpprpolicy"    "SCTP_PR_SCTP_[A-Z_]+[[:space:]]+0x[0-9]+"     "neti
 gen_table "cmsgtypesocket"  "SCM_[A-Z_]+[[:space:]]+0x[0-9]+"              "sys/socket.h"
 if [ -e "${include_dir}/x86/sysarch.h" ]; then
 	gen_table "sysarchnum" "(AMD64|I386)_[A-Z86_]+[[:space:]]+[0-9]+"  "x86/sysarch.h"
+elif [ -e "${include_dir}/arm/sysarch.h" ]; then
+	echo "#ifdef __aarch64__"
+	gen_table "sysarchnum" "ARM64_[A-Z_]+[[:space:]]+0x[0-9]+"         "machine/sysarch.h"
+	echo "#endif"
+	echo "#ifdef __arm__"
+	gen_table "sysarchnum" "ARM_[A-Z_]+[[:space:]]+[0-9]+"             "arm/sysarch.h"
+	echo "#endif"
 else
 	gen_table "sysarchnum" "[A-Z_]+[[:space:]]+[0-9]+"                 "machine/sysarch.h"
 fi

@@ -47,6 +47,9 @@ static u_int __read_mostly mte_version = 0;
  */
 #define	MTE_HAS_TAG_CHECK	(mte_version >= 2)
 
+static u_int __read_mostly mte_flags = 0;
+#define	MTE_HAS_ASYNC		1
+
 struct thread *mte_switch(struct thread *);
 
 #define load_tags(addr) ({						\
@@ -78,6 +81,57 @@ mte_update_sctlr(struct thread *td, uint64_t sctlr)
 	MPASS((sctlr & ~(SCTLR_ATA0 | SCTLR_TCF0_MASK)) == 0);
 	td->td_md.md_sctlr &= ~(SCTLR_ATA0 | SCTLR_TCF0_MASK);
 	td->td_md.md_sctlr |= sctlr;
+}
+
+int
+mte_sysarch_ctrl(struct thread *td, uint64_t flags)
+{
+	uint64_t mask, sctlr;
+	bool clear_tfsr;
+
+	if (!MTE_HAS_TAG_CHECK)
+		return (0);
+
+	clear_tfsr = false;
+	switch (flags & MTE_CTRL_TCF_MASK) {
+	case MTE_CTRL_TCF_NONE:
+		sctlr = SCTLR_TCF0_NONE;
+		break;
+	case MTE_CTRL_TCF_SYNC:
+		sctlr = SCTLR_TCF0_SYNC;
+		break;
+	case MTE_CTRL_TCF_ASYNC:
+		if ((mte_flags & MTE_HAS_ASYNC) == 0)
+			return (EINVAL);
+
+		sctlr = SCTLR_TCF0_ASYNC;
+		clear_tfsr = true;
+		break;
+	default:
+		/* TODO: Support FEAT_MTE_ASYM_FAULT */
+		return (EINVAL);
+	}
+
+	if ((flags & MTE_CTRL_ENABLE) != 0)
+		sctlr |= SCTLR_ATA0;
+
+	/* Tag Exclusion Mask */
+	mask = (flags & MTE_CTRL_EXCLUDE_MASK) >> MTE_CTRL_EXCLUDE_SHIFT;
+	td->td_md.md_gcr = mask << GCR_Exclude_SHIFT | GCR_RRND;
+	/* MTE mode */
+	mte_update_sctlr(td, sctlr);
+
+	if (td == curthread) {
+		printf("writing new sctlr val: 0x%lx\n", sctlr);
+		WRITE_SPECIALREG(sctlr_el1,
+		    (READ_SPECIALREG(sctlr_el1) & ~SCTLR_USER_MASK) | sctlr);
+		WRITE_SPECIALREG(GCR_EL1_REG, td->td_md.md_gcr);
+		if (clear_tfsr)
+			WRITE_SPECIALREG(TFSRE0_EL1_REG, 0);
+		isb();
+	}
+
+	return (0);
 }
 
 /**
