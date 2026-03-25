@@ -55,7 +55,13 @@
 #if __BSD_VISIBLE
 #define	PROT_CHERI0	0x08
 #define	PROT_CHERI1	0x10
-#define	_PROT_ALL	(PROT_READ | PROT_WRITE | PROT_EXEC)
+#ifdef __aarch64__
+#define	PROT_MTE	0x20
+#define	_PROT_ARCH	(PROT_MTE)
+#else
+#define	_PROT_ARCH	0
+#endif
+#define	_PROT_ALL	(PROT_READ | PROT_WRITE | PROT_EXEC | _PROT_ARCH)
 #define	PROT_EXTRACT(prot)	((prot) & _PROT_ALL)
 
 #define	_PROT_MAX_SHIFT	16
