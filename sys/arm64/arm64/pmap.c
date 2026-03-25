@@ -6852,6 +6852,7 @@ pmap_zero_page(vm_page_t m)
 	vm_offset_t va = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
 
 	pagezero((void *)va);
+	m->md.pv_flags &= ~PV_MTE_TAGGED;
 }
 
 /*
