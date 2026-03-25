@@ -285,6 +285,8 @@ void	mte_thread_alloc(struct thread *);
 void	mte_thread0(struct thread *);
 
 void	mte_sync_tags(vm_page_t page);
+void	mte_save_tags(vm_page_t, void *);
+void	mte_load_tags(vm_page_t, const void *);
 void	mte_copy_tags(vm_page_t, vm_page_t, vm_offset_t, vm_offset_t);
 
 /* Functions to read the sanitised view of the special registers */

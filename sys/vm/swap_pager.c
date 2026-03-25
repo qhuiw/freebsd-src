@@ -142,6 +142,9 @@
 struct swblk {
 	vm_pindex_t	p;
 	daddr_t		d[SWAP_META_PAGES];
+#ifdef __aarch64__
+	uint8_t		*t[SWAP_META_PAGES];
+#endif
 };
 
 /*
@@ -426,6 +429,10 @@ static uma_zone_t swwbuf_zone;
 static uma_zone_t swrbuf_zone;
 static uma_zone_t swblk_zone;
 static uma_zone_t swpctrie_zone;
+
+#ifdef __aarch64__
+static uma_zone_t swtag_zone;
+#endif
 
 /*
  * pagerops for OBJT_SWAP - "swap pager".  Some ops are also global procedure
@@ -770,6 +777,25 @@ swap_pager_swap_init(void)
 	if (!uma_zone_reserve_kva(swpctrie_zone, n))
 		printf("Cannot reserve swap pctrie zone, "
 		    "reduce kern.maxswzone.\n");
+
+#ifdef __aarch64__
+	swtag_zone = uma_zcreate("swtag", PAGE_SIZE / 32, NULL, NULL,
+	    NULL, NULL, (PAGE_SIZE / 32) - 1, 0);
+	/* XXX: Should it be n * SWAP_META_PAGES ? */
+	if (!uma_zone_reserve_kva(swtag_zone, n))
+		printf("Cannot reserve swap pctrie zone, "
+		    "reduce kern.maxswzone.\n");
+#endif
+}
+
+static void
+swap_swblk_free(struct swblk *sb)
+{
+#ifdef __aarch64__
+	for (int i = 0; i < SWAP_META_PAGES; i++)
+		uma_zfree(swtag_zone, sb->t[i]);
+#endif
+	uma_zfree(swblk_zone, sb);
 }
 
 bool
@@ -1540,6 +1566,42 @@ swap_pager_getpages_async(vm_object_t object, vm_page_t *ma, int count,
 	return (r);
 }
 
+static void
+swp_pager_meta_arch_put_page(vm_page_t m)
+{
+#if defined(__aarch64__)
+	struct swblk *sb;
+	vm_pindex_t modpi;
+
+	sb = swblk_lookup(m->object, m->pindex);
+	modpi = m->pindex % SWAP_META_PAGES;
+	if ((m->md.pv_flags & PV_MTE_TAGGED) != 0) {
+		if (sb->t[modpi] == NULL)
+			sb->t[modpi] = uma_zalloc(swtag_zone, M_WAITOK);
+		mte_save_tags(m, sb->t[modpi]);
+	} else if (sb->t[modpi] != NULL) {
+		uma_zfree(swtag_zone, sb->t[modpi]);
+		sb->t[modpi] = NULL;
+	}
+#endif
+}
+
+static void
+swp_pager_meta_arch_get_page(vm_page_t m)
+{
+#if defined(__aarch64__)
+	struct swblk *sb;
+	vm_pindex_t modpi;
+
+	sb = swblk_lookup(m->object, m->pindex);
+	modpi = m->pindex % SWAP_META_PAGES;
+	if (sb->t[modpi] != NULL) {
+		mte_load_tags(m, sb->t[modpi]);
+		dmb(ishst); /* Ensure the tags are loaded */
+	}
+#endif
+}
+
 /*
  *	swap_pager_putpages:
  *
@@ -1624,6 +1686,11 @@ swap_pager_putpages(vm_object_t object, vm_page_t *ma, int count,
 			mreq->oflags |= VPO_SWAPINPROG;
 		}
 		VM_OBJECT_WUNLOCK(object);
+
+		for (j = 0; j < n; ++j) {
+			mreq = ma[i + j];
+			swp_pager_meta_arch_put_page(mreq);
+		}
 
 		bp = uma_zalloc(swwbuf_zone, M_WAITOK);
 		MPASS((bp->b_flags & B_MAXPHYS) != 0);
@@ -1804,6 +1871,7 @@ swp_pager_async_iodone(struct buf *bp)
 			KASSERT(m->dirty == 0,
 			    ("swp_pager_async_iodone: page %p is dirty", m));
 
+			swp_pager_meta_arch_get_page(m);
 			vm_page_valid(m);
 			if (i < bp->b_pgbefore ||
 			    i >= bp->b_npages - bp->b_pgafter)
@@ -2013,7 +2081,7 @@ swap_pager_swapoff_object(struct swdevt *sp, vm_object_t object,
 		}
 		if (sb_empty) {
 			swblk_iter_remove(&blks);
-			uma_zfree(swblk_zone, sb);
+			swap_swblk_free(sb);
 		}
 
 		/*
@@ -2137,7 +2205,7 @@ swp_pager_free_empty_swblk(vm_object_t object, struct swblk *sb)
 
 	if (swp_pager_swblk_empty(sb, 0, SWAP_META_PAGES)) {
 		swblk_lookup_remove(object, sb);
-		uma_zfree(swblk_zone, sb);
+		swap_swblk_free(sb);
 	}
 }
 
@@ -2174,8 +2242,12 @@ swp_pager_meta_build(struct pctrie_iter *blks, vm_object_t object,
 			    pageproc ? M_USE_RESERVE : 0));
 			if (sb != NULL) {
 				sb->p = rounddown(pindex, SWAP_META_PAGES);
-				for (i = 0; i < SWAP_META_PAGES; i++)
+				for (i = 0; i < SWAP_META_PAGES; i++) {
 					sb->d[i] = SWAPBLK_NONE;
+#ifdef __aarch64__
+					sb->t[i] = NULL;
+#endif
+				}
 				if (atomic_cmpset_int(&swblk_zone_exhausted,
 				    1, 0))
 					printf("swblk zone ok\n");
@@ -2212,7 +2284,7 @@ swp_pager_meta_build(struct pctrie_iter *blks, vm_object_t object,
 				break;
 			}
 			if (nowait_noreplace) {
-				uma_zfree(swblk_zone, sb);
+				swap_swblk_free(sb);
 				return (swapblk);
 			}
 			VM_OBJECT_WUNLOCK(object);
@@ -2228,7 +2300,7 @@ swp_pager_meta_build(struct pctrie_iter *blks, vm_object_t object,
 			VM_OBJECT_WLOCK(object);
 			sb1 = swblk_iter_reinit(blks, object, pindex);
 			if (sb1 != NULL) {
-				uma_zfree(swblk_zone, sb);
+				swap_swblk_free(sb);
 				sb = sb1;
 				goto allocated;
 			}
@@ -2250,7 +2322,7 @@ allocated:
 		if (swapblk == SWAPBLK_NONE &&
 		    swp_pager_swblk_empty(sb, 0, SWAP_META_PAGES)) {
 			swblk_iter_remove(blks);
-			uma_zfree(swblk_zone, sb);
+			swap_swblk_free(sb);
 		}
 	}
 	return (prev_swapblk);
@@ -2312,7 +2384,7 @@ swp_pager_meta_transfer(vm_object_t srcobject, vm_object_t dstobject,
 		if (swp_pager_swblk_empty(sb, 0, start) &&
 		    swp_pager_swblk_empty(sb, limit, SWAP_META_PAGES)) {
 			swblk_iter_remove(&srcblks);
-			uma_zfree(swblk_zone, sb);
+			swap_swblk_free(sb);
 		}
 		if (d_mask != 0) {
 			/* Finish block transfer, with the lock released. */
@@ -2381,7 +2453,7 @@ swp_pager_meta_free(vm_object_t object, vm_pindex_t pindex, vm_pindex_t count,
 		if (swp_pager_swblk_empty(sb, 0, start) &&
 		    swp_pager_swblk_empty(sb, limit, SWAP_META_PAGES)) {
 			swblk_iter_remove(&blks);
-			uma_zfree(swblk_zone, sb);
+			swap_swblk_free(sb);
 		}
 	}
 	swp_pager_freeswapspace(&range);
@@ -2399,7 +2471,7 @@ swp_pager_meta_free_block(struct swblk *sb, void *rangev)
 		if (sb->d[i] != SWAPBLK_NONE)
 			swp_pager_update_freerange(range, sb->d[i]);
 	}
-	uma_zfree(swblk_zone, sb);
+	swap_swblk_free(sb);
 }
 
 /*

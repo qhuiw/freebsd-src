@@ -111,6 +111,62 @@ mte_sync_tags(vm_page_t page)
 	page->md.pv_flags |= PV_MTE_TAGGED;
 }
 
+void
+mte_save_tags(vm_page_t m, void *tags)
+{
+	vm_offset_t va;
+	size_t block_size;
+	uint64_t tag_word, tmp;
+
+	block_size = mte_block_size();
+	va = PHYS_TO_DMAP(m->phys_addr);
+	for (int i = 0; i < PAGE_SIZE / 32; i += sizeof(uint64_t)) {
+		tag_word = 0;
+		__asm __volatile(
+		    ".arch_extension memtag	\n"
+		    "1:				\n"
+		    /* Load the tag granule */
+		    "ldgm	%1, [%2]	\n"
+		    /* Store the parts in tag_word */
+		    "orr	%0, %0, %1	\n"
+		    /* Next tag granule */
+		    "add	%2, %2, %3	\n"
+		    /* Check if we are on the last granule for this word */
+		    "tst	%2, 0xff	\n"
+		    "b.ne	1b		\n"
+		    ".arch_extension nomemtag" :
+		    "+r" (tag_word), "=r"(tmp), "+r" (va) : "r" (block_size));
+
+		*(uint64_t *)((uintptr_t)tags + i) = tag_word;
+	}
+}
+
+void
+mte_load_tags(vm_page_t m, const void *tags)
+{
+	vm_offset_t va;
+	size_t block_size;
+	uint64_t tag_word;
+
+	block_size = mte_block_size();
+	va = PHYS_TO_DMAP(m->phys_addr);
+	for (int i = 0; i < PAGE_SIZE / 32; i += sizeof(uint64_t)) {
+		tag_word = *(uint64_t *)((uintptr_t)tags + i);
+		__asm __volatile(
+		    ".arch_extension memtag	\n"
+		    "1:				\n"
+		    /* Store the tag granule */
+		    "stgm	%1, [%0]	\n"
+		    /* Next tag granule */
+		    "add	%0, %0, %2	\n"
+		    /* Check if we are on the last granule for this word */
+		    "tst	%0, 0xff	\n"
+		    "b.ne	1b		\n"
+		    ".arch_extension nomemtag" :
+		    "+r" (va) : "r" (tag_word), "r" (block_size));
+	}
+}
+
 /**
  * Copy the allocation tags from given target to destination page. This is called
  * on a copy-on-write and anything that causes a pmap_copy_page call.
