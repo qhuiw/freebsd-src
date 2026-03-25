@@ -278,6 +278,51 @@ mte_check_async(struct thread *td, struct trapframe *frame, bool syscall)
 	return (false);
 }
 
+static cpu_feat_en
+mte_check(const struct cpu_feat *feat __unused, u_int midr __unused)
+{
+	uint64_t id_aa64pfr1;
+
+	get_kernel_reg(ID_AA64PFR1_EL1, &id_aa64pfr1);
+	if (ID_AA64PFR1_MTE_VAL(id_aa64pfr1) == ID_AA64PFR1_MTE_NONE)
+		return (FEAT_ALWAYS_DISABLE);
+	return (FEAT_DEFAULT_ENABLE);
+}
+
+static bool
+mte_enable(const struct cpu_feat *feat __unused,
+    cpu_feat_errata errata_status __unused, u_int *errata_list __unused,
+    u_int errata_count __unused)
+{
+	uint64_t id_aa64pfr1;
+
+	pmap_change_dmap_attr(VM_MEMATTR_TAGGED);
+
+	get_kernel_reg(ID_AA64PFR1_EL1, &id_aa64pfr1);
+	mte_version = ID_AA64PFR1_MTE_VAL(id_aa64pfr1) >> ID_AA64PFR1_MTE_SHIFT;
+
+	if (ID_AA64PFR1_MTE_frac_VAL(id_aa64pfr1) != ID_AA64PFR1_MTE_frac_NONE)
+		mte_flags |= MTE_HAS_ASYNC;
+
+	return (true);
+}
+
+static void
+mte_disabled(const struct cpu_feat *feat __unused)
+{
+	/*
+	 * MTE may be disabled, mask out the ID fields we expose to
+	 * userspace and the rest of the kernel so they don't try to
+	 * use it.
+	 */
+	update_special_reg(ID_AA64PFR1_EL1, ID_AA64PFR1_MTE_MASK, 0);
+
+}
+
+CPU_FEAT(feat_mte, "Memory Tagging",
+    mte_check, NULL, mte_enable, mte_disabled,
+    CPU_FEAT_AFTER_DEV | CPU_FEAT_SYSTEM);
+
 void
 mte_fork(struct thread *new_td, struct thread *orig_td)
 {

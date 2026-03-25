@@ -1123,6 +1123,9 @@ LENTRY(start_mmu)
 	 * Setup SCTLR.
 	 */
 	ldr	x1, =SCTLR_MMU_ON
+	CHECK_CPU_FEAT(x2, ID_AA64PFR1, MTE, MTE2, .Lno_mte)
+	orr	x1, x1, SCTLR_ATA
+.Lno_mte:
 	msr	sctlr_el1, x1
 	isb
 
