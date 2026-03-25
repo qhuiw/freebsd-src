@@ -246,6 +246,38 @@ mte_copy_tags(vm_page_t srcpage, vm_page_t dstpage, vm_offset_t src, vm_offset_t
 	dstpage->md.pv_flags |= PV_MTE_TAGGED;
 }
 
+bool
+mte_check_async(struct thread *td, struct trapframe *frame, bool syscall)
+{
+	ksiginfo_t ksi;
+
+	if (!MTE_HAS_TAG_CHECK)
+		return (false);
+
+	if ((mte_flags & MTE_HAS_ASYNC) == 0)
+		return (false);
+
+	if (atomic_testandclear_32(&td->td_md.md_flags,
+	    MD_FLAG_MTE_ASYNC_FAULT_SHIFT)) {
+		/*
+		 * If we are in a syscall adjust elr so the faulting
+		 * instruction is the svc that entered the kernel.
+		 */
+		if (syscall)
+			frame->tf_elr -= 4;
+
+		ksiginfo_init_trap(&ksi);
+		ksi.ksi_signo = SIGSEGV;
+		ksi.ksi_code = SEGV_MTEAERR;
+		ksi.ksi_addr = 0;
+		ksi.ksi_trapno = ESR_ELx_EXCEPTION(frame->tf_esr);
+		trapsignal(td, &ksi);
+		return (true);
+	}
+
+	return (false);
+}
+
 void
 mte_fork(struct thread *new_td, struct thread *orig_td)
 {

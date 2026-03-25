@@ -292,6 +292,7 @@ void	mte_sync_tags(vm_page_t page);
 void	mte_save_tags(vm_page_t, void *);
 void	mte_load_tags(vm_page_t, const void *);
 void	mte_copy_tags(vm_page_t, vm_page_t, vm_offset_t, vm_offset_t);
+bool	mte_check_async(struct thread *, struct trapframe *, bool);
 
 int mte_sysarch_ctrl(struct thread *, uint64_t);
 

@@ -88,7 +88,7 @@ int (*dtrace_invop_jump_addr)(struct trapframe *);
 u_long cnt_efirt_faults;
 int print_efirt_faults;
 
-typedef void (abort_handler)(struct thread *, struct trapframe *, uint64_t,
+typedef bool (abort_handler)(struct thread *, struct trapframe *, uint64_t,
     uint64_t, int);
 
 static abort_handler align_abort;
@@ -198,20 +198,25 @@ test_bs_fault(void *addr)
 static bool
 svc_handler(struct thread *td, struct trapframe *frame)
 {
+	/* TODO: This could cause issues for sigreturn? */
+	if (mte_check_async(td, frame, true)) {
+		userret(td, frame);
+		return (true);
+	}
 
 	if ((frame->tf_esr & ESR_ELx_ISS_MASK) == 0) {
 		syscallenter(td);
 		syscallret(td);
 		/* Skip userret as syscallret already called it */
 		return (true);
-	} else {
-		call_trapsignal(td, SIGILL, ILL_ILLOPN, (void *)frame->tf_elr,
-		    ESR_ELx_EXCEPTION(frame->tf_esr));
-		return (false);
 	}
+
+	call_trapsignal(td, SIGILL, ILL_ILLOPN, (void *)frame->tf_elr,
+	    ESR_ELx_EXCEPTION(frame->tf_esr));
+	return (false);
 }
 
-static void
+static bool
 align_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
     uint64_t far, int lower)
 {
@@ -224,17 +229,18 @@ align_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 
 	call_trapsignal(td, SIGBUS, BUS_ADRALN, (void *)frame->tf_elr,
 	    ESR_ELx_EXCEPTION(frame->tf_esr));
+	return (true);
 }
 
 
-static void
+static bool
 external_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
     uint64_t far, int lower)
 {
 	if (lower) {
 		call_trapsignal(td, SIGBUS, BUS_OBJERR, (void *)far,
 		    ESR_ELx_EXCEPTION(frame->tf_esr));
-		return;
+		return (true);
 	}
 
 	/*
@@ -243,7 +249,7 @@ external_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 	 */
 	if (test_bs_fault((void *)frame->tf_elr)) {
 		frame->tf_elr = (uint64_t)generic_bs_fault;
-		return;
+		return (false);
 	}
 
 	print_registers(frame);
@@ -252,7 +258,7 @@ external_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 	panic("Unhandled external data abort");
 }
 
-static void
+static bool
 tag_check_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
     uint64_t far, int lower)
 {
@@ -269,7 +275,7 @@ tag_check_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 
 	call_trapsignal(td, SIGSEGV, SEGV_MTESERR, (void *)far,
 	    ESR_ELx_EXCEPTION(frame->tf_esr));
-	userret(td, frame);
+	return (true);
 }
 
 /*
@@ -278,7 +284,7 @@ tag_check_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
  * Thus, stack-smashing detection with per-thread canaries must be disabled in
  * this function.
  */
-static void NO_PERTHREAD_SSP
+static bool NO_PERTHREAD_SSP
 data_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
     uint64_t far, int lower)
 {
@@ -301,7 +307,7 @@ data_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 #ifdef KDB
 	if (kdb_active) {
 		kdb_reenter();
-		return;
+		return (false);
 	}
 #endif
 
@@ -334,7 +340,7 @@ data_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 			case ISS_DATA_DFSC_TF_L2:
 			case ISS_DATA_DFSC_TF_L3:
 				if (pmap_klookup(far, NULL))
-					return;
+					return (false);
 				break;
 			}
 		}
@@ -365,7 +371,7 @@ data_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 	 */
 	if ((lower || map == kernel_map || pcb->pcb_onfault != 0) &&
 	    pmap_fault(map->pmap, esr, fault_va) == KERN_SUCCESS)
-		return;
+		return (false);
 
 #ifdef INVARIANTS
 	if (td->td_md.md_spinlock_count != 0) {
@@ -411,12 +417,13 @@ data_abort(struct thread *td, struct trapframe *frame, uint64_t esr,
 		if (lower) {
 			call_trapsignal(td, sig, ucode, (void *)far,
 			    ESR_ELx_EXCEPTION(esr));
+			return (true);
 		} else {
 bad_far:
 			if (td->td_intr_nesting_level == 0 &&
 			    pcb->pcb_onfault != 0) {
 				frame->tf_elr = pcb->pcb_onfault;
-				return;
+				return (false);
 			}
 
 			printf("Fatal data abort:\n");
@@ -431,13 +438,14 @@ bad_far:
 				    frame);
 				kdb_why = KDB_WHY_UNSET;
 				if (handled)
-					return;
+					return (false);
 			}
 #endif
 			panic("vm_fault failed: 0x%lx error %d",
 			    frame->tf_elr, error);
 		}
 	}
+	return (false);
 }
 
 static void
@@ -691,7 +699,7 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 	uint32_t exception;
 	uint64_t esr, far;
 	int dfsc;
-	bool skip_userret;
+	bool has_sig, skip_userret;
 
 	/* Check we have a sane environment when entering from userland */
 	KASSERT((uintptr_t)get_pcpu() >= VM_MIN_KERNEL_ADDRESS,
@@ -720,6 +728,7 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 	    __func__, exception, frame->tf_elr, esr);
 
 	skip_userret = false;
+	has_sig = false;
 	switch (exception) {
 	case EXCP_FP_SIMD:
 #ifdef VFP
@@ -731,52 +740,58 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 	case EXCP_TRAP_FP:
 #ifdef VFP
 		fpe_trap(td, (void *)frame->tf_elr, esr);
+		has_sig = true;
 #else
 		panic("VFP exception in userland");
 #endif
 		break;
 	case EXCP_SVE:
 		/* Returns true if this thread can use SVE */
-		if (!sve_restore_state(td))
+		if (!sve_restore_state(td)) {
 			call_trapsignal(td, SIGILL, ILL_ILLTRP,
 			    (void *)frame->tf_elr, exception);
+			has_sig = true;
+		}
 		break;
 	case EXCP_SVC32:
 	case EXCP_SVC64:
 		skip_userret = svc_handler(td, frame);
+		has_sig = true;
 		break;
 	case EXCP_INSN_ABORT_L:
 	case EXCP_DATA_ABORT_L:
 	case EXCP_DATA_ABORT:
 		dfsc = esr & ISS_DATA_DFSC_MASK;
 		if (dfsc < nitems(abort_handlers) &&
-		    abort_handlers[dfsc] != NULL)
-			abort_handlers[dfsc](td, frame, esr, far, 1);
-		else {
-			print_registers(frame);
-			print_gp_register("far", far);
-			printf(" esr: 0x%.16lx\n", esr);
-			panic("Unhandled EL0 %s abort: 0x%x",
-			    exception == EXCP_INSN_ABORT_L ? "instruction" :
-			    "data", dfsc);
+		    abort_handlers[dfsc] != NULL) {
+			has_sig = abort_handlers[dfsc](td, frame, esr, far, 1);
+		} else {
+			call_trapsignal(td, SIGBUS, BUS_OBJERR,
+			    (void *)frame->tf_elr, exception);
+			has_sig = true;
 		}
 		break;
 	case EXCP_UNKNOWN:
-		if (!undef_insn(frame))
+		if (!undef_insn(frame)) {
 			call_trapsignal(td, SIGILL, ILL_ILLTRP, (void *)far,
 			    exception);
+			has_sig = true;
+		}
 		break;
 	case EXCP_FPAC:
 		call_trapsignal(td, SIGILL, ILL_ILLOPN, (void *)frame->tf_elr,
 		    exception);
+		has_sig = true;
 		break;
 	case EXCP_SP_ALIGN:
 		call_trapsignal(td, SIGBUS, BUS_ADRALN, (void *)frame->tf_sp,
 		    exception);
+		has_sig = true;
 		break;
 	case EXCP_PC_ALIGN:
 		call_trapsignal(td, SIGBUS, BUS_ADRALN, (void *)frame->tf_elr,
 		    exception);
+		has_sig = true;
 		break;
 	case EXCP_BRKPT_EL0:
 	case EXCP_BRK:
@@ -785,10 +800,12 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 #endif /* COMPAT_FREEBSD32 */
 		call_trapsignal(td, SIGTRAP, TRAP_BRKPT, (void *)frame->tf_elr,
 		    exception);
+		has_sig = true;
 		break;
 	case EXCP_WATCHPT_EL0:
 		call_trapsignal(td, SIGTRAP, TRAP_TRACE, (void *)far,
 		    exception);
+		has_sig = true;
 		break;
 	case EXCP_MSR:
 		/*
@@ -796,9 +813,11 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 		 * instruction to access a special register userspace doesn't
 		 * have access to.
 		 */
-		if (!undef_insn(frame))
+		if (!undef_insn(frame)) {
 			call_trapsignal(td, SIGILL, ILL_PRVOPC,
 			    (void *)frame->tf_elr, exception);
+			has_sig = true;
+		}
 		break;
 	case EXCP_SOFTSTP_EL0:
 		PROC_LOCK(td->td_proc);
@@ -811,10 +830,12 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 		PROC_UNLOCK(td->td_proc);
 		call_trapsignal(td, SIGTRAP, TRAP_TRACE,
 		    (void *)frame->tf_elr, exception);
+		has_sig = true;
 		break;
 	case EXCP_BTI:
 		call_trapsignal(td, SIGILL, ILL_ILLOPC, (void *)frame->tf_elr,
 		    exception);
+		has_sig = true;
 		break;
 	case EXCP_MOE:
 		handle_moe(td, frame, esr);
@@ -822,9 +843,12 @@ do_el0_sync(struct thread *td, struct trapframe *frame)
 	default:
 		call_trapsignal(td, SIGBUS, BUS_OBJERR, (void *)frame->tf_elr,
 		    exception);
+		has_sig = true;
 		break;
 	}
 
+	if (!has_sig)
+		mte_check_async(td, frame, false);
 	if (!skip_userret)
 		userret(td, frame);
 	KASSERT(
