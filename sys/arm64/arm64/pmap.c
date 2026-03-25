@@ -351,6 +351,7 @@ struct pv_chunks_list __exclusive_cache_line pv_chunks[PMAP_MEMDOM];
 vm_paddr_t dmap_phys_base;	/* The start of the dmap region */
 vm_paddr_t dmap_phys_max;	/* The limit of the dmap region */
 vm_offset_t dmap_max_addr;	/* The virtual address limit of the dmap */
+static int dmap_attr = VM_MEMATTR_WRITE_BACK;
 
 extern pt_entry_t pagetable_l0_ttbr1[];
 
@@ -476,7 +477,7 @@ static void pmap_abort_ptp(pmap_t pmap, vm_offset_t va, vm_page_t mpte);
 static bool pmap_activate_int(struct thread *td, pmap_t pmap);
 static void pmap_alloc_asid(pmap_t pmap);
 static int pmap_change_props_locked(vm_offset_t va, vm_size_t size,
-    vm_prot_t prot, int mode, bool skip_unmapped);
+    vm_prot_t prot, int mode, int old_mode, bool skip_unmapped);
 static bool pmap_copy_l3c(pmap_t pmap, pt_entry_t *l3p, vm_offset_t va,
     pt_entry_t l3e, vm_page_t ml3, struct rwlock **lockp);
 static pt_entry_t *pmap_demote_l1(pmap_t pmap, pt_entry_t *l1, vm_offset_t va);
@@ -8090,7 +8091,7 @@ pmap_unmapbios(void *p, vm_size_t size)
 		/* Ensure the attributes are as expected for the DMAP region */
 		PMAP_LOCK(kernel_pmap);
 		error = pmap_change_props_locked(va, size,
-		    PROT_READ | PROT_WRITE, VM_MEMATTR_DEFAULT, false);
+		    PROT_READ | PROT_WRITE, VM_MEMATTR_DEFAULT, -1, false);
 		PMAP_UNLOCK(kernel_pmap);
 		KASSERT(error == 0, ("%s: Failed to reset DMAP attributes: %d",
 		    __func__, error));
@@ -8195,7 +8196,25 @@ pmap_change_attr(vm_offset_t va, vm_size_t size, int mode)
 	int error;
 
 	PMAP_LOCK(kernel_pmap);
-	error = pmap_change_props_locked(va, size, PROT_NONE, mode, false);
+	error = pmap_change_props_locked(va, size, PROT_NONE, mode, -1, false);
+	PMAP_UNLOCK(kernel_pmap);
+	return (error);
+}
+
+int
+pmap_change_dmap_attr(int mode)
+{
+	int error;
+
+	KASSERT(mode == VM_MEMATTR_WRITE_BACK ||
+	    mode == VM_MEMATTR_TAGGED,
+	    ("%s: mode %d must be compatible with write-back", __func__, mode));
+
+	PMAP_LOCK(kernel_pmap);
+	error = pmap_change_props_locked(DMAP_MIN_ADDRESS,
+	    dmap_max_addr - DMAP_MIN_ADDRESS, PROT_NONE, mode, dmap_attr, true);
+	if (error == 0)
+		dmap_attr = mode;
 	PMAP_UNLOCK(kernel_pmap);
 	return (error);
 }
@@ -8217,20 +8236,20 @@ pmap_change_prot(vm_offset_t va, vm_size_t size, vm_prot_t prot)
 		return (EINVAL);
 
 	PMAP_LOCK(kernel_pmap);
-	error = pmap_change_props_locked(va, size, prot, -1, false);
+	error = pmap_change_props_locked(va, size, prot, -1, -1, false);
 	PMAP_UNLOCK(kernel_pmap);
 	return (error);
 }
 
 static int
 pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
-    int mode, bool skip_unmapped)
+    int mode, int old_mode, bool skip_unmapped)
 {
 	vm_offset_t base, offset, tmpva, tmpptep;
 	vm_size_t pte_size;
 	vm_paddr_t pa;
 	pt_entry_t pte, *ptep, *newpte;
-	pt_entry_t bits, mask;
+	pt_entry_t bits, mask, old_mode_bits, old_mode_mask;
 	int lvl, rv;
 
 	PMAP_LOCK_ASSERT(kernel_pmap, MA_OWNED);
@@ -8242,8 +8261,8 @@ pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
 	    !(base >= VM_MIN_KERNEL_ADDRESS && base < VM_MAX_KERNEL_ADDRESS))
 		return (EINVAL);
 
-	bits = 0;
-	mask = 0;
+	bits = old_mode_bits = 0;
+	mask = old_mode_mask = 0;
 	if (mode != -1) {
 		bits = ATTR_S1_IDX(mode);
 		mask = ATTR_S1_IDX_MASK;
@@ -8251,6 +8270,10 @@ pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
 			mask |= ATTR_S1_XN;
 			bits |= ATTR_S1_XN;
 		}
+	}
+	if (old_mode != -1) {
+		old_mode_bits = ATTR_S1_IDX(old_mode);
+		old_mode_mask = ATTR_S1_IDX_MASK;
 	}
 	if (prot != VM_PROT_NONE) {
 		/* Don't mark the DMAP as executable. It never is on arm64. */
@@ -8279,7 +8302,8 @@ pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
 		if (ptep == NULL && !skip_unmapped) {
 			return (EINVAL);
 		} else if ((ptep == NULL && skip_unmapped) ||
-		    (pmap_load(ptep) & mask) == bits) {
+		    (pmap_load(ptep) & mask) == bits ||
+		    (pmap_load(ptep) & old_mode_mask) != old_mode_bits) {
 			/*
 			 * We already have the correct attribute or there
 			 * is no memory mapped at this address and we are
@@ -8407,12 +8431,23 @@ pmap_change_props_locked(vm_offset_t va, vm_size_t size, vm_prot_t prot,
 
 			pa = PTE_TO_PHYS(pte);
 			if (!VIRT_IN_DMAP(tmpva) && PHYS_IN_DMAP(pa)) {
+				int dmap_mode;
+
+				/*
+				 * When booting on HW with MTE enabled we may
+				 * need to swap to a tagged type for the DMAP
+				 */
+				if (mode == VM_MEMATTR_WRITE_BACK)
+					dmap_mode = dmap_attr;
+				else
+					dmap_mode = mode;
+
 				/*
 				 * Keep the DMAP memory in sync.
 				 */
 				rv = pmap_change_props_locked(
 				    PHYS_TO_DMAP(pa), pte_size,
-				    prot, mode, true);
+				    prot, dmap_mode, old_mode, true);
 				if (rv != 0)
 					return (rv);
 			}
