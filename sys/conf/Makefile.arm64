@@ -43,6 +43,17 @@ CFLAGS += ${ARM64_SSP_CFLAGS}
 ARCH_FLAGS += ${ARM64_SSP_CFLAGS}
 .endif
 
+# Use a config option as a switch to enable ARM MTE per-kernel build.
+# There is an associated kernel config file GENERIC-MTE under sys/arm64/conf.
+ARM64_MTE_ENABLED!= grep ARM64_MTE opt_arm64_mte.h || true ; echo
+.if !empty(ARM64_MTE_ENABLED)
+CFLAGS += -march=armv8.5-a+memtag
+ARCH_FLAGS += -march=armv8.5-a+memtag
+AFLAGS += -march=armv8.5-a+memtag
+.endif
+
+
+
 # Use a custom SYSTEM_LD command to generate the elf kernel, so we can
 # set the text segment start address, and also strip the "arm mapping
 # symbols" which have names like $a.0 and $d.2; see the document
