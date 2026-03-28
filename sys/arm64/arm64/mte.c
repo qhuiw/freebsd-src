@@ -53,8 +53,8 @@ struct thread *mte_switch(struct thread *);
 #define set_tags(tags, addr) do {					\
 	asm volatile(							\
 	    ".arch_extension memtag	\n"				\
-	    "stgm %0, [%0]		\n"				\
-	    ".arch_extension nomemtag" : "=r" (tags) : "r" (addr));	\
+	    "stgm %0, [%1]		\n"				\
+	    ".arch_extension nomemtag" : : "r" (tags), "r" (addr) : "memory");	\
 } while (0)
 
 /* Fetch the block size used by tag load and store instructions */
