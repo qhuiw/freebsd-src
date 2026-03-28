@@ -25,6 +25,9 @@ EFIRT				opt_efirt.h
 # Bhyve
 VMM				opt_global.h
 
+# Experimental ARM64 Memory Tagging Extension
+ARM64_MTE       opt_arm64_mte.h
+
 # SoC Support
 SOC_ALLWINNER_A64		opt_soc.h
 SOC_ALLWINNER_H5		opt_soc.h
