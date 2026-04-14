@@ -47,9 +47,7 @@ ARCH_FLAGS += ${ARM64_SSP_CFLAGS}
 # There is an associated kernel config file GENERIC-MTE under sys/arm64/conf.
 ARM64_MTE_ENABLED!= grep ARM64_MTE opt_arm64_mte.h || true ; echo
 .if !empty(ARM64_MTE_ENABLED)
-CFLAGS += -march=armv8.5-a+memtag
-ARCH_FLAGS += -march=armv8.5-a+memtag
-AFLAGS += -march=armv8.5-a+memtag
+CFLAGS.mte.c += -march=armv8.5-a+memtag
 .endif
 
 
