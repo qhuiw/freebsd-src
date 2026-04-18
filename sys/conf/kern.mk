@@ -48,6 +48,17 @@ CWARNEXTRA?=	-Wno-error=tautological-compare -Wno-error=empty-body \
 		-Wno-error=pointer-sign
 CWARNEXTRA+=	-Wno-error=shift-negative-value
 CWARNEXTRA+=	-Wno-address-of-packed-member
+.if ${COMPILER_VERSION} >= 200000
+# -Wuninitialized-const-pointer was introduced around clang 20 and fires on
+# some existing kernel paths (e.g. imgact_elf.c) that are not yet fixed
+# upstream.
+CWARNEXTRA+=	-Wno-error=uninitialized-const-pointer
+.endif
+.if ${COMPILER_VERSION} >= 230000
+# -Wunused-but-set-global was not a valid user-facing flag until clang 23;
+# earlier versions emit the group name in diagnostics but reject it as a flag.
+CWARNEXTRA+=	-Wno-error=unused-but-set-global
+.endif
 .endif	# clang
 
 .if ${COMPILER_TYPE} == "gcc"

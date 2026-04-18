@@ -87,16 +87,31 @@ CWARNFLAGS+=	-Wdate-time
 CWARNFLAGS.clang+=	-Wno-empty-body -Wno-string-plus-int
 CWARNFLAGS.clang+=	-Wno-unused-const-variable
 .if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 150000
-CWARNFLAGS.clang+=	-Wno-error=unused-but-set-parameter
+CWARNFLAGS.clang+=	-Wno-error=unused-but-set-parameter \
+		-Wno-error=unused-but-set-variable
 .endif
 .if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 190000
 # Similar to gcc >= 8.1 -Wno-error=cast-function-type below
 CWARNFLAGS.clang+=	-Wno-error=cast-function-type-mismatch
 .endif
+.if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 200000
+# -Wuninitialized-const-pointer was introduced around clang 20 and fires on some
+# existing FreeBSD code paths (e.g. imgact_elf.c) that are not yet fixed upstream.
+CWARNFLAGS.clang+=	-Wno-error=uninitialized-const-pointer
+.endif
 .if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 210000
 CXXWARNFLAGS.clang+=	-Wno-c++20-extensions
 CXXWARNFLAGS.clang+=	-Wno-c++23-lambda-attributes
 CXXWARNFLAGS.clang+=	-Wno-nullability-completeness
+# -Wimplicit-function-declaration was introduced in clang 21;
+# it fires on top-level HAVE_MEMPCPY definition in tzconfig.h on cross-builds on macOS
+# as macOS C runtime libSystem does not have mempcpy but HAVE_MEMPCPY is default to 1 in tzconfig.h.
+CWARNFLAGS.clang+=	-Wno-error=implicit-function-declaration
+.endif
+.if ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 230000
+# -Wunused-but-set-global was not a valid user-facing flag until clang 23;
+# earlier versions emit the group name in diagnostics but reject it as a flag.
+CWARNFLAGS.clang+=	-Wno-error=unused-but-set-global
 .endif
 .endif # WARNS <= 6
 .if ${WARNS} <= 3
