@@ -19,11 +19,22 @@
 #include "Plugins/Process/Utility/RegisterFlagsDetector_arm64.h"
 #include "Plugins/Process/Utility/RegisterInfoPOSIX_arm64.h"
 
+#include <algorithm>
+#include <cstring>
+
 // clang-format off
 #include <sys/param.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 // clang-format on
+
+#ifndef HWCAP2_MTE
+#define HWCAP2_MTE (1ULL << 18)
+#endif
+#ifndef NT_ARM_TAGGED_ADDR_CTRL
+#define NT_ARM_TAGGED_ADDR_CTRL 0x409
+#endif
 
 using namespace lldb;
 using namespace lldb_private;
@@ -35,6 +46,17 @@ using namespace lldb_private::process_freebsd;
 // fields all over again.
 static std::mutex g_register_flags_detector_mutex;
 static Arm64RegisterFlagsDetector g_register_flags_detector;
+
+static Flags GetOptionalRegisterSets(NativeThreadFreeBSD &native_thread) {
+  Flags opt_regsets;
+  NativeProcessFreeBSD &process = native_thread.GetProcess();
+  uint64_t hwcap2 = process.GetAuxValue(AuxVector::AUXV_AT_HWCAP2).value_or(0);
+
+  if (hwcap2 & HWCAP2_MTE)
+    opt_regsets.Set(RegisterInfoPOSIX_arm64::eRegsetMaskMTE);
+
+  return opt_regsets;
+}
 
 NativeRegisterContextFreeBSD *
 NativeRegisterContextFreeBSD::CreateHostNativeRegisterContextFreeBSD(
@@ -53,7 +75,9 @@ NativeRegisterContextFreeBSD::CreateHostNativeRegisterContextFreeBSD(
 NativeRegisterContextFreeBSD_arm64::NativeRegisterContextFreeBSD_arm64(
     const ArchSpec &target_arch, NativeThreadFreeBSD &native_thread)
     : NativeRegisterContextRegisterInfo(
-          native_thread, new RegisterInfoPOSIX_arm64(target_arch, 0))
+          native_thread,
+          new RegisterInfoPOSIX_arm64(target_arch,
+                                      GetOptionalRegisterSets(native_thread)))
 #ifdef LLDB_HAS_FREEBSD_WATCHPOINT
       ,
       m_read_dbreg(false)
@@ -62,6 +86,8 @@ NativeRegisterContextFreeBSD_arm64::NativeRegisterContextFreeBSD_arm64(
   g_register_flags_detector.UpdateRegisterInfo(
       GetRegisterInfoInterface().GetRegisterInfo(),
       GetRegisterInfoInterface().GetRegisterCount());
+
+  ResizeRegisterData();
 
   ::memset(&m_hwp_regs, 0, sizeof(m_hwp_regs));
   ::memset(&m_hbp_regs, 0, sizeof(m_hbp_regs));
@@ -88,6 +114,15 @@ uint32_t NativeRegisterContextFreeBSD_arm64::GetUserRegisterCount() const {
   return count;
 }
 
+void NativeRegisterContextFreeBSD_arm64::ResizeRegisterData() {
+  const RegisterInfo *reg_info = GetRegisterInfoInterface().GetRegisterInfo();
+  size_t size = sizeof(reg) + sizeof(fpreg);
+  for (uint32_t i = 0; i < GetRegisterInfoInterface().GetRegisterCount(); ++i)
+    size = std::max<size_t>(size,
+                            reg_info[i].byte_offset + reg_info[i].byte_size);
+  m_reg_data.resize(size);
+}
+
 Status NativeRegisterContextFreeBSD_arm64::ReadRegisterSet(uint32_t set) {
   switch (set) {
   case RegisterInfoPOSIX_arm64::GPRegSet:
@@ -98,7 +133,20 @@ Status NativeRegisterContextFreeBSD_arm64::ReadRegisterSet(uint32_t set) {
         PT_GETFPREGS, m_thread.GetID(),
         m_reg_data.data() + sizeof(RegisterInfoPOSIX_arm64::GPR));
   }
-  llvm_unreachable("NativeRegisterContextFreeBSD_arm64::ReadRegisterSet");
+
+  const RegisterSet *reg_set = GetRegisterInfo().GetRegisterSet(set);
+  if (reg_set == nullptr)
+    return Status("invalid register set %" PRIu32, set);
+
+  if (llvm::StringRef(reg_set->short_name) == "mte") {
+    struct iovec iov;
+    iov.iov_base = m_reg_data.data() + GetRegisterInfo().GetMTEOffset();
+    iov.iov_len = sizeof(uint64_t);
+    return NativeProcessFreeBSD::PtraceWrapper(
+        PT_GETREGSET, m_thread.GetID(), &iov, NT_ARM_TAGGED_ADDR_CTRL);
+  }
+
+  return Status("unsupported register set %s", reg_set->name);
 }
 
 Status NativeRegisterContextFreeBSD_arm64::WriteRegisterSet(uint32_t set) {
@@ -111,7 +159,20 @@ Status NativeRegisterContextFreeBSD_arm64::WriteRegisterSet(uint32_t set) {
         PT_SETFPREGS, m_thread.GetID(),
         m_reg_data.data() + sizeof(RegisterInfoPOSIX_arm64::GPR));
   }
-  llvm_unreachable("NativeRegisterContextFreeBSD_arm64::WriteRegisterSet");
+
+  const RegisterSet *reg_set = GetRegisterInfo().GetRegisterSet(set);
+  if (reg_set == nullptr)
+    return Status("invalid register set %" PRIu32, set);
+
+  if (llvm::StringRef(reg_set->short_name) == "mte") {
+    struct iovec iov;
+    iov.iov_base = m_reg_data.data() + GetRegisterInfo().GetMTEOffset();
+    iov.iov_len = sizeof(uint64_t);
+    return NativeProcessFreeBSD::PtraceWrapper(
+        PT_SETREGSET, m_thread.GetID(), &iov, NT_ARM_TAGGED_ADDR_CTRL);
+  }
+
+  return Status("unsupported register set %s", reg_set->name);
 }
 
 Status
@@ -172,13 +233,11 @@ Status NativeRegisterContextFreeBSD_arm64::ReadAllRegisterValues(
     lldb::WritableDataBufferSP &data_sp) {
   Status error;
 
-  error = ReadRegisterSet(RegisterInfoPOSIX_arm64::GPRegSet);
-  if (error.Fail())
-    return error;
-
-  error = ReadRegisterSet(RegisterInfoPOSIX_arm64::FPRegSet);
-  if (error.Fail())
-    return error;
+  for (uint32_t set = 0; set < GetRegisterSetCount(); ++set) {
+    error = ReadRegisterSet(set);
+    if (error.Fail())
+      return error;
+  }
 
   data_sp.reset(new DataBufferHeap(m_reg_data.size(), 0));
   uint8_t *dst = data_sp->GetBytes();
@@ -220,7 +279,20 @@ Status NativeRegisterContextFreeBSD_arm64::WriteAllRegisterValues(
   if (error.Fail())
     return error;
 
-  return WriteRegisterSet(RegisterInfoPOSIX_arm64::FPRegSet);
+  error = WriteRegisterSet(RegisterInfoPOSIX_arm64::FPRegSet);
+  if (error.Fail())
+    return error;
+
+  for (uint32_t set = 0; set < GetRegisterSetCount(); ++set) {
+    const RegisterSet *reg_set = GetRegisterInfo().GetRegisterSet(set);
+    if (reg_set != nullptr && llvm::StringRef(reg_set->short_name) == "mte") {
+      error = WriteRegisterSet(set);
+      if (error.Fail())
+        return error;
+    }
+  }
+
+  return error;
 }
 
 llvm::Error NativeRegisterContextFreeBSD_arm64::CopyHardwareWatchpointsFrom(

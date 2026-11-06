@@ -21,7 +21,7 @@
 #include "Plugins/Process/Utility/NativeRegisterContextDBReg_arm64.h"
 #include "Plugins/Process/Utility/RegisterInfoPOSIX_arm64.h"
 
-#include <array>
+#include <vector>
 
 #if __FreeBSD_version >= 1300139
 #  define LLDB_HAS_FREEBSD_WATCHPOINT 1
@@ -63,7 +63,7 @@ private:
   // LLDB's GPR/FPU structs.  However, all fields have matching offsets
   // and sizes, so we do not have to worry about these (and we have
   // a unittest to assert that).
-  std::array<uint8_t, sizeof(reg) + sizeof(fpreg)> m_reg_data;
+  std::vector<uint8_t> m_reg_data;
 #ifdef LLDB_HAS_FREEBSD_WATCHPOINT
   dbreg m_dbreg;
   bool m_read_dbreg;
@@ -71,6 +71,7 @@ private:
 
   Status ReadRegisterSet(uint32_t set);
   Status WriteRegisterSet(uint32_t set);
+  void ResizeRegisterData();
 
   llvm::Error ReadHardwareDebugInfo() override;
   llvm::Error WriteHardwareDebugRegs(DREGType hwbType) override;
