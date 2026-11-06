@@ -10,19 +10,43 @@
 
 // clang-format off
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/sysctl.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+#include <sys/auxv.h>
 #include <machine/elf.h>
 // clang-format on
 
+#ifndef PROT_MTE
+#define PROT_MTE 0x20
+#endif
+
+#ifndef KVME_PROT_MTE
+#define KVME_PROT_MTE 0x00000020
+#endif
+
+#ifndef PT_GETMTETAGS
+#define PT_GETMTETAGS (PT_FIRSTMACH + 2)
+#define PT_SETMTETAGS (PT_FIRSTMACH + 3)
+struct ptrace_mte_tag_desc {
+  void *pmted_addr;
+  void *pmted_tags;
+  size_t pmted_len;
+};
+#endif
+
 #include "Plugins/Process/POSIX/ProcessPOSIXLog.h"
+#include "Plugins/Process/Utility/MemoryTagManagerAArch64MTE.h"
 #include "lldb/Host/HostProcess.h"
 #include "lldb/Host/posix/ProcessLauncherPosixFork.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Utility/State.h"
 #include "llvm/Support/Errno.h"
+
+#include <algorithm>
+#include <array>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -146,13 +170,23 @@ NativeProcessFreeBSD::Manager::Attach(
 
 NativeProcessFreeBSD::Extension
 NativeProcessFreeBSD::Manager::GetSupportedExtensions() const {
-  return
+  NativeProcessFreeBSD::Extension supported =
 #if defined(PT_COREDUMP)
       Extension::savecore |
 #endif
       Extension::multiprocess | Extension::fork | Extension::vfork |
       Extension::pass_signals | Extension::auxv | Extension::libraries_svr4 |
       Extension::siginfo_read;
+
+#ifdef __aarch64__
+  // At this point we do not have a process so read auxv directly.
+  u_long hwcap2 = 0;
+  if (elf_aux_info(AT_HWCAP2, &hwcap2, sizeof(hwcap2)) == 0 &&
+      (hwcap2 & HWCAP2_MTE) != 0)
+    supported |= Extension::memory_tagging;
+#endif
+
+  return supported;
 }
 
 // Public Instance Methods
@@ -452,6 +486,8 @@ Status NativeProcessFreeBSD::Resume(const ResumeActionList &resume_actions) {
   Log *log = GetLog(POSIXLog::Process);
   LLDB_LOG(log, "pid {0}", GetID());
 
+  m_mem_region_cache.clear();
+
   Status ret;
 
   int signal = 0;
@@ -692,6 +728,11 @@ Status NativeProcessFreeBSD::PopulateMemoryRegionCache() {
       info.SetExecutable(MemoryRegionInfo::OptionalBool::eYes);
     else
       info.SetExecutable(MemoryRegionInfo::OptionalBool::eNo);
+
+    if (kv->kve_protection & KVME_PROT_MTE)
+      info.SetMemoryTagged(MemoryRegionInfo::OptionalBool::eYes);
+    else
+      info.SetMemoryTagged(MemoryRegionInfo::OptionalBool::eNo);
 
     if (kv->kve_path[0])
       info.SetName(kv->kve_path);
@@ -934,6 +975,77 @@ Status NativeProcessFreeBSD::WriteMemory(lldb::addr_t addr, const void *buf,
   } while (bytes_written < size);
 
   return error;
+}
+
+Status NativeProcessFreeBSD::ReadMemoryTags(int32_t type, lldb::addr_t addr,
+                                            size_t len,
+                                            std::vector<uint8_t> &tags) {
+  static constexpr int32_t eMTEAllocationTag = 1;
+  static constexpr size_t eMTEGranuleSize = 16;
+
+  if (type != eMTEAllocationTag)
+    return Status("unsupported memory tag type %" PRId32, type);
+
+  tags.resize((len + eMTEGranuleSize - 1) / eMTEGranuleSize);
+
+  struct ptrace_mte_tag_desc desc;
+  desc.pmted_addr = reinterpret_cast<void *>(addr);
+  desc.pmted_tags = tags.data();
+  desc.pmted_len = tags.size();
+
+  Status error = NativeProcessFreeBSD::PtraceWrapper(PT_GETMTETAGS, GetID(),
+                                                     &desc, sizeof(desc));
+  if (error.Fail())
+    return error;
+
+  tags.resize(desc.pmted_len);
+  return Status();
+}
+
+Status NativeProcessFreeBSD::WriteMemoryTags(int32_t type, lldb::addr_t addr,
+                                             size_t len,
+                                             const std::vector<uint8_t> &tags) {
+  const MemoryTagManagerAArch64MTE tag_manager;
+  if (type != tag_manager.GetAllocationTagType())
+    return Status("unsupported memory tag type %" PRId32, type);
+  if (GetArchitecture().GetMachine() != llvm::Triple::aarch64)
+    return Status("memory tag writes require an AArch64 target");
+
+  addr = tag_manager.RemoveTagBits(addr);
+  if (len != 0 &&
+      len - 1 > tag_manager.RemoveTagBits(LLDB_INVALID_ADDRESS) - addr)
+    return Status("memory tag write range exceeds the address space");
+
+  const auto range = tag_manager.ExpandToGranule({addr, len});
+  const lldb::addr_t granule_size = tag_manager.GetGranuleSize();
+  const size_t num_tags = range.GetByteSize() / granule_size;
+  if (num_tags != 0 && tags.empty())
+    return Status("memory tag write requires at least one tag");
+
+  // Bound the buffer size even when the remote packet specifies a large range.
+  std::array<uint8_t, 1024> buffer;
+  size_t tags_written = 0;
+  // A zero-length write still goes through ptrace to check MTE support.
+  do {
+    const size_t count = std::min(num_tags - tags_written, buffer.size());
+    for (size_t i = 0; i < count; ++i)
+      buffer[i] = tags[(tags_written + i) % tags.size()];
+
+    struct ptrace_mte_tag_desc desc = {
+        reinterpret_cast<void *>(range.GetRangeBase() +
+                                 tags_written * granule_size),
+        buffer.data(), count};
+    Status error = PtraceWrapper(PT_SETMTETAGS, GetID(), &desc, sizeof(desc));
+    if (error.Fail())
+      return error;
+    if (desc.pmted_len != count)
+      return Status("short memory tag write: wrote %zu of %zu tags",
+                    tags_written + desc.pmted_len, num_tags);
+
+    tags_written += count;
+  } while (tags_written < num_tags);
+
+  return Status();
 }
 
 llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
