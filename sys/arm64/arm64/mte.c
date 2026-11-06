@@ -28,13 +28,18 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/libkern.h>
+#include <sys/mman.h>
 #include <sys/proc.h>
+#include <sys/systm.h>
 
 #include <machine/cpu_feat.h>
 #include <machine/pcb.h>
 #include <machine/pte.h>
 #include <machine/sysarch.h>
 #include <vm/vm.h>
+#include <vm/pmap.h>
+#include <vm/vm_extern.h>
+#include <vm/vm_map.h>
 #include <vm/vm_page.h>
 
 /* Version of MTE implemented. 0 == unimplemented */
@@ -49,6 +54,10 @@ static u_int __read_mostly mte_version = 0;
 
 static u_int __read_mostly mte_flags = 0;
 #define	MTE_HAS_ASYNC		1
+
+#define	MTE_GRANULE_SIZE	16
+#define	MTE_PAGE_TAGS		(PAGE_SIZE / MTE_GRANULE_SIZE)
+#define	MTE_PAGE_TAG_BYTES	(MTE_PAGE_TAGS / 2)
 
 struct thread *mte_switch(struct thread *);
 
@@ -132,6 +141,101 @@ mte_sysarch_ctrl(struct thread *td, uint64_t flags)
 	}
 
 	return (0);
+}
+
+int
+mte_ptrace_tags(struct thread *td, bool write, void *addr, void *tags,
+    size_t *lenp)
+{
+	uint8_t page_tags[MTE_PAGE_TAG_BYTES];
+	struct proc *p;
+	vm_map_entry_t entry;
+	vm_offset_t end, va;
+	vm_page_t m;
+	vm_prot_t prot;
+	size_t copied, len, page_idx, page_start;
+	int count, error;
+	uint8_t tag;
+
+	if (!MTE_HAS_TAG_CHECK)
+		return (EOPNOTSUPP);
+
+	p = td->td_proc;
+	va = rounddown2((vm_offset_t)addr, MTE_GRANULE_SIZE);
+	len = *lenp;
+	copied = 0;
+	error = 0;
+	prot = write ? VM_PROT_WRITE : VM_PROT_READ;
+
+	while (copied < len) {
+		vm_map_lock_read(&p->p_vmspace->vm_map);
+		if (!vm_map_lookup_entry(&p->p_vmspace->vm_map, va, &entry) ||
+		    va >= entry->end) {
+			vm_map_unlock_read(&p->p_vmspace->vm_map);
+			error = EIO;
+			break;
+		}
+		if ((entry->protection & PROT_MTE) == 0) {
+			vm_map_unlock_read(&p->p_vmspace->vm_map);
+			error = EOPNOTSUPP;
+			break;
+		}
+		end = MIN(entry->end, round_page(va + 1));
+		vm_map_unlock_read(&p->p_vmspace->vm_map);
+
+		count = vm_fault_quick_hold_pages(&p->p_vmspace->vm_map,
+		    trunc_page(va), PAGE_SIZE, prot, &m, 1);
+		if (count != 1) {
+			error = EIO;
+			break;
+		}
+
+		if ((m->md.pv_flags & PV_MTE_TAGGED) == 0) {
+			vm_page_unhold_pages(&m, 1);
+			error = EOPNOTSUPP;
+			break;
+		}
+
+		mte_save_tags(m, page_tags);
+		page_start = copied;
+		for (; copied < len && va < end;
+		    copied++, va += MTE_GRANULE_SIZE) {
+			page_idx = (va & PAGE_MASK) / MTE_GRANULE_SIZE;
+			if (write) {
+				error = copyin((char *)tags + copied, &tag,
+				    sizeof(tag));
+				if (error != 0)
+					break;
+				tag &= 0xf;
+				page_tags[page_idx / 2] &=
+				    ~(0xf << ((page_idx & 1) * 4));
+				page_tags[page_idx / 2] |=
+				    tag << ((page_idx & 1) * 4);
+			} else {
+				tag = (page_tags[page_idx / 2] >>
+				    ((page_idx & 1) * 4)) & 0xf;
+				error = copyout(&tag, (char *)tags + copied,
+				    sizeof(tag));
+				if (error != 0)
+					break;
+			}
+		}
+		if (write && copied != page_start) {
+			mte_load_tags(m, page_tags);
+			m->md.pv_flags |= PV_MTE_TAGGED;
+		}
+		vm_page_unhold_pages(&m, 1);
+
+		if (error != 0)
+			break;
+	}
+
+	if (copied != 0) {
+		*lenp = copied;
+		return (0);
+	}
+
+	return (error);
 }
 
 /**

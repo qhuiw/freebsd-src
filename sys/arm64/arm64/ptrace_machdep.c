@@ -45,15 +45,32 @@
 #include <sys/ucontext.h>
 
 #include <machine/armreg.h>
+#include <machine/cpu.h>
 #include <machine/pcb.h>
 
-/* Only used to get/set 32bits VFP regs */
 int
 cpu_ptrace(struct thread *td, int req, void *arg, int data)
 {
+	struct ptrace_mte_tag_desc mte_desc;
+	int error;
+
+	switch (req) {
+	case PT_GETMTETAGS:
+	case PT_SETMTETAGS:
+		if (data != sizeof(mte_desc))
+			return (EINVAL);
+		error = copyin(arg, &mte_desc, sizeof(mte_desc));
+		if (error != 0)
+			return (error);
+		error = mte_ptrace_tags(td, req == PT_SETMTETAGS,
+		    mte_desc.pmted_addr, mte_desc.pmted_tags, &mte_desc.pmted_len);
+		if (error != 0)
+			return (error);
+		return (copyout(&mte_desc, arg, sizeof(mte_desc)));
+	}
+
 #if defined(VFP) && defined(COMPAT_FREEBSD32)
 	mcontext32_vfp_t vfp;
-	int error;
 
 	if (!SV_CURPROC_FLAG(SV_ILP32))
 		return (EINVAL);
@@ -186,4 +203,3 @@ ptrace_clear_single_step(struct thread *td)
 	td->td_dbgflags &= ~TDB_STEP;
 	return (0);
 }
-
