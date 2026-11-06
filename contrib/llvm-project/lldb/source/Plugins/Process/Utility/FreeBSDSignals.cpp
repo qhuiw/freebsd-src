@@ -14,6 +14,12 @@
 #ifndef FPE_FLTIDO
 #define FPE_FLTIDO 9
 #endif
+#ifndef SEGV_MTEAERR
+#define SEGV_MTEAERR 3
+#endif
+#ifndef SEGV_MTESERR
+#define SEGV_MTESERR 4
+#endif
 
 #define ADD_SIGCODE(signal_name, signal_value, code_name, code_value, ...)     \
   static_assert(signal_name == signal_value,                                   \
@@ -65,6 +71,9 @@ void FreeBSDSignals::Reset() {
   ADD_SIGCODE(SIGSEGV, 11, SEGV_MAPERR, 1,   "address not mapped to object",
                   SignalCodePrintOption::Address);
   ADD_SIGCODE(SIGSEGV, 11, SEGV_ACCERR, 2,   "invalid permissions for mapped object",
+                  SignalCodePrintOption::Address);
+  ADD_SIGCODE(SIGSEGV, 11, SEGV_MTEAERR, 3,  "async tag check fault");
+  ADD_SIGCODE(SIGSEGV, 11, SEGV_MTESERR, 4,  "sync tag check fault",
                   SignalCodePrintOption::Address);
   ADD_SIGCODE(SIGSEGV, 11, SEGV_PKUERR, 100, "PKU violation",
                   SignalCodePrintOption::Address);
