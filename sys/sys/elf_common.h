@@ -864,6 +864,7 @@ typedef struct {
 #define	NT_ARM_TLS	0x401	/* ARM TLS register */
 #define	NT_ARM_SVE	0x405	/* ARM SVE registers */
 #define	NT_ARM_ADDR_MASK	0x406	/* arm64 address mask (e.g. for TBI) */
+#define	NT_ARM_TAGGED_ADDR_CTRL	0x409	/* arm64 tagged address control */
 
 /* GNU note types. */
 #define	NT_GNU_ABI_TAG		1

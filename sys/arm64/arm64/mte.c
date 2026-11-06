@@ -26,10 +26,12 @@
  */
 
 #include <sys/param.h>
+#include <sys/elf.h>
 #include <sys/kernel.h>
 #include <sys/libkern.h>
 #include <sys/mman.h>
 #include <sys/proc.h>
+#include <sys/reg.h>
 #include <sys/systm.h>
 
 #include <machine/cpu_feat.h>
@@ -142,6 +144,77 @@ mte_sysarch_ctrl(struct thread *td, uint64_t flags)
 
 	return (0);
 }
+
+static uint64_t
+mte_get_tagged_addr_ctrl(struct thread *td)
+{
+	uint64_t flags, mask;
+
+	flags = 0;
+	if ((td->td_md.md_sctlr & SCTLR_ATA0) != 0)
+		flags |= MTE_CTRL_ENABLE;
+
+	switch (td->td_md.md_sctlr & SCTLR_TCF0_MASK) {
+	case SCTLR_TCF0_SYNC:
+		flags |= MTE_CTRL_TCF_SYNC;
+		break;
+	case SCTLR_TCF0_ASYNC:
+		flags |= MTE_CTRL_TCF_ASYNC;
+		break;
+	case SCTLR_TCF0_NONE:
+	default:
+		flags |= MTE_CTRL_TCF_NONE;
+		break;
+	}
+
+	mask = (td->td_md.md_gcr & GCR_Exclude_MASK) >> GCR_Exclude_SHIFT;
+	flags |= mask << MTE_CTRL_EXCLUDE_SHIFT;
+
+	return (flags);
+}
+
+static bool
+get_arm64_mte_ctrl(struct regset *rs __unused, struct thread *td, void *buf,
+    size_t *sizep)
+{
+	uint64_t flags;
+
+	if (!MTE_HAS_TAG_CHECK)
+		return (false);
+
+	if (buf != NULL) {
+		KASSERT(*sizep == sizeof(flags),
+		    ("%s: invalid size", __func__));
+		flags = mte_get_tagged_addr_ctrl(td);
+		memcpy(buf, &flags, sizeof(flags));
+	}
+	*sizep = sizeof(flags);
+
+	return (true);
+}
+
+static bool
+set_arm64_mte_ctrl(struct regset *rs __unused, struct thread *td, void *buf,
+    size_t size)
+{
+	uint64_t flags;
+
+	if (!MTE_HAS_TAG_CHECK)
+		return (false);
+
+	KASSERT(size == sizeof(flags), ("%s: invalid size", __func__));
+	memcpy(&flags, buf, sizeof(flags));
+
+	return (mte_sysarch_ctrl(td, flags) == 0);
+}
+
+static struct regset regset_arm64_mte_ctrl = {
+	.note = NT_ARM_TAGGED_ADDR_CTRL,
+	.size = sizeof(uint64_t),
+	.get = get_arm64_mte_ctrl,
+	.set = set_arm64_mte_ctrl,
+};
+ELF_REGSET(regset_arm64_mte_ctrl);
 
 int
 mte_ptrace_tags(struct thread *td, bool write, void *addr, void *tags,
