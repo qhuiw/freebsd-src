@@ -2468,6 +2468,10 @@ sysctl_kern_proc_ovmmap(SYSCTL_HANDLER_ARGS)
 			kve->kve_protection |= KVME_PROT_WRITE;
 		if (entry->protection & VM_PROT_EXECUTE)
 			kve->kve_protection |= KVME_PROT_EXEC;
+#ifdef PROT_MTE
+		if (entry->protection & PROT_MTE)
+			kve->kve_protection |= KVME_PROT_MTE;
+#endif
 
 		if (entry->eflags & MAP_ENTRY_COW)
 			kve->kve_flags |= KVME_FLAG_COW;
@@ -2685,6 +2689,10 @@ kern_proc_vmmap_out(struct proc *p, struct sbuf *sb, ssize_t maxlen, int flags)
 			kve->kve_protection |= KVME_PROT_WRITE;
 		if (entry->protection & VM_PROT_EXECUTE)
 			kve->kve_protection |= KVME_PROT_EXEC;
+#ifdef PROT_MTE
+		if (entry->protection & PROT_MTE)
+			kve->kve_protection |= KVME_PROT_MTE;
+#endif
 		if (entry->max_protection & VM_PROT_READ)
 			kve->kve_protection |= KVME_MAX_PROT_READ;
 		if (entry->max_protection & VM_PROT_WRITE)
