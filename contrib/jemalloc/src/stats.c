@@ -1403,6 +1403,7 @@ stats_general_print(emitter_t *emitter) {
 	CONFIG_WRITE_BOOL(cache_oblivious);
 	CONFIG_WRITE_BOOL(debug);
 	CONFIG_WRITE_BOOL(fill);
+	CONFIG_WRITE_BOOL(mte);
 	CONFIG_WRITE_BOOL(lazy_lock);
 	emitter_kv(emitter, "malloc_conf", "config.malloc_conf",
 	    emitter_type_string, &config_malloc_conf);
@@ -1461,6 +1462,7 @@ stats_general_print(emitter_t *emitter) {
 	emitter_dict_begin(emitter, "opt", "Run-time option settings");
 
 	OPT_WRITE_BOOL("abort")
+	OPT_WRITE_BOOL("mte")
 	OPT_WRITE_BOOL("abort_conf")
 	OPT_WRITE_BOOL("cache_oblivious")
 	OPT_WRITE_BOOL("confirm_conf")

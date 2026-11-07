@@ -1375,6 +1375,7 @@ malloc_conf_init_helper(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
 			}
 
 			CONF_HANDLE_BOOL(opt_tcache, "tcache")
+			CONF_HANDLE_BOOL(opt_mte, "mte")
 			CONF_HANDLE_SIZE_T(opt_tcache_max, "tcache_max",
 			    0, TCACHE_MAXCLASS_LIMIT, CONF_DONT_CHECK_MIN,
 			    CONF_CHECK_MAX, /* clip */ true)
@@ -1818,6 +1819,9 @@ malloc_init_hard_a0_locked() {
 		prof_boot0();
 	}
 	malloc_conf_init(&sc_data, bin_shard_sizes);
+	if (mte_boot()) {
+		return true;
+	}
 	san_init(opt_lg_san_uaf_align);
 	sz_boot(&sc_data, opt_cache_oblivious);
 	bin_info_boot(&sc_data, bin_shard_sizes);
@@ -2597,6 +2601,10 @@ imalloc_body(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd) {
 	    && unlikely(opt_junk_alloc)) {
 		junk_alloc_callback(allocation, usize);
 	}
+	if (unlikely(opt_mte)) {
+		/* All initialization used the allocator's tag-zero pointer. */
+		allocation = mte_alloc(allocation, usize);
+	}
 
 	if (sopts->slow) {
 		UTRACE(0, size, allocation);
@@ -2866,6 +2874,12 @@ je_calloc(size_t num, size_t size) {
 
 JEMALLOC_ALWAYS_INLINE void
 ifree(tsd_t *tsd, void *ptr, tcache_t *tcache, bool slow_path) {
+	if (unlikely(opt_mte)) {
+		if (!mte_validate(ptr)) {
+			return;
+		}
+		ptr = mte_untag(ptr);
+	}
 	if (!slow_path) {
 		tsd_assert_fast(tsd);
 	}
@@ -2885,6 +2899,10 @@ ifree(tsd_t *tsd, void *ptr, tcache_t *tcache, bool slow_path) {
 	size_t usize = sz_index2size(alloc_ctx.szind);
 	if (config_prof && opt_prof) {
 		prof_free(tsd, ptr, usize, &alloc_ctx);
+	}
+	if (unlikely(opt_mte)) {
+		/* Invalidate before junk filling, caching, or publishing to an arena. */
+		mte_dalloc(ptr, usize);
 	}
 
 	if (likely(!slow_path)) {
@@ -2925,6 +2943,16 @@ maybe_check_alloc_ctx(tsd_t *tsd, void *ptr, emap_alloc_ctx_t *alloc_ctx) {
 
 JEMALLOC_ALWAYS_INLINE void
 isfree(tsd_t *tsd, void *ptr, size_t usize, tcache_t *tcache, bool slow_path) {
+	if (unlikely(opt_mte)) {
+		/* Never use an unchecked size hint to change adjacent objects' tags. */
+		size_t actual = isalloc(tsd_tsdn(tsd), mte_untag(ptr));
+		if (actual != usize) {
+			safety_check_fail_sized_dealloc(true, ptr, actual, usize);
+			return;
+		}
+		ifree(tsd, ptr, tcache, slow_path);
+		return;
+	}
 	if (!slow_path) {
 		tsd_assert_fast(tsd);
 	}
@@ -3067,6 +3095,10 @@ free_fastpath_nonfast_aligned(void *ptr, bool check_prof) {
 /* Returns whether or not the free attempt was successful. */
 JEMALLOC_ALWAYS_INLINE
 bool free_fastpath(void *ptr, size_t size, bool size_hint) {
+	/* Free must invalidate tags even if the object remains in a tcache. */
+	if (unlikely(opt_mte)) {
+		return false;
+	}
 	tsd_t *tsd = tsd_get(false);
 	/* The branch gets optimized away unless tsd_get_allocates(). */
 	if (unlikely(tsd == NULL)) {
@@ -3493,8 +3525,58 @@ irallocx_prof(tsd_t *tsd, void *old_ptr, size_t old_usize, size_t size,
 	return p;
 }
 
+/*
+ * Until in-place resizing is tag-aware, keep the old allocation live while
+ * allocating and copying.  In particular, allocation failure must not change
+ * the old pointer's tag.  imalloc()/ifree() account for the two operations.
+ */
+static void *
+do_rallocx_mte(void *ptr, size_t size, int flags, bool is_realloc) {
+	assert(ptr != NULL && size != 0);
+	tsd_t *tsd = tsd_fetch();
+	if (!mte_validate(ptr)) {
+		return NULL;
+	}
+	size_t old_usize = isalloc(tsd_tsdn(tsd), mte_untag(ptr));
+	void *ret;
+	static_opts_t sopts;
+	dynamic_opts_t dopts;
+	static_opts_init(&sopts);
+	dynamic_opts_init(&dopts);
+	sopts.assert_nonempty_alloc = true;
+	sopts.null_out_result_on_error = true;
+	sopts.set_errno_on_error = is_realloc;
+	sopts.oom_string = "<jemalloc>: Error in rallocx(): out of memory\n";
+	dopts.result = &ret;
+	dopts.num_items = 1;
+	dopts.item_size = size;
+	dopts.alignment = MALLOCX_ALIGN_GET(flags);
+	dopts.zero = MALLOCX_ZERO_GET(flags);
+	dopts.tcache_ind = mallocx_tcache_get(flags);
+	dopts.arena_ind = mallocx_arena_get(flags);
+	imalloc(&sopts, &dopts);
+	if (ret == NULL) {
+		return NULL;
+	}
+
+	uintptr_t args[4] = {(uintptr_t)ptr, size, flags, 0};
+	hook_invoke_alloc(is_realloc ? hook_alloc_realloc : hook_alloc_rallocx,
+	    ret, (uintptr_t)ret, args);
+	/* Both payloads are live; preserve their logical tags for the copy. */
+	memcpy(ret, ptr, old_usize < size ? old_usize : size);
+	hook_invoke_dalloc(is_realloc ? hook_dalloc_realloc : hook_dalloc_rallocx,
+	    ptr, args);
+	tcache_t *tcache = tcache_get_from_ind(tsd, dopts.tcache_ind,
+	    /* slow */ true, /* is_alloc */ false);
+	ifree(tsd, ptr, tcache, /* slow_path */ true);
+	return ret;
+}
+
 static void *
 do_rallocx(void *ptr, size_t size, int flags, bool is_realloc) {
+	if (unlikely(opt_mte)) {
+		return do_rallocx_mte(ptr, size, flags, is_realloc);
+	}
 	void *p;
 	tsd_t *tsd;
 	size_t usize;
@@ -3770,6 +3852,9 @@ je_xallocx(void *ptr, size_t size, size_t extra, int flags) {
 	assert(size != 0);
 	assert(SIZE_T_MAX - size >= extra);
 	assert(malloc_initialized() || IS_INITIALIZER);
+	if (unlikely(opt_mte) && !mte_validate(ptr)) {
+		return 0;
+	}
 	tsd = tsd_fetch();
 	check_entry_exit_locking(tsd_tsdn(tsd));
 
@@ -3787,6 +3872,11 @@ je_xallocx(void *ptr, size_t size, size_t extra, int flags) {
 	assert(alloc_ctx.szind != SC_NSIZES);
 	old_usize = sz_index2size(alloc_ctx.szind);
 	assert(old_usize == isalloc(tsd_tsdn(tsd), ptr));
+	if (unlikely(opt_mte)) {
+		/* xallocx cannot return a replacement pointer/tag. */
+		usize = old_usize;
+		goto label_not_resized;
+	}
 	/*
 	 * The API explicitly absolves itself of protecting against (size +
 	 * extra) numerical overflow, but we may need to clamp extra to avoid
@@ -4146,6 +4236,17 @@ batch_alloc(void **ptrs, size_t num, size_t size, int flags) {
 	size_t filled = 0;
 
 	if (unlikely(tsd == NULL || tsd_reentrancy_level_get(tsd) > 0)) {
+		goto label_done;
+	}
+	if (unlikely(opt_mte)) {
+		/* The bulk path bypasses imalloc_body() and its tag handoff. */
+		while (filled < num) {
+			void *ptr = je_mallocx(size, flags);
+			if (ptr == NULL) {
+				break;
+			}
+			ptrs[filled++] = ptr;
+		}
 		goto label_done;
 	}
 

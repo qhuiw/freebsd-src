@@ -56,6 +56,10 @@
 #ifdef __aarch64__
 #  define LG_VADDR		48
 #  define LG_SIZEOF_PTR		3
+#  ifndef __CHERI_PURE_CAPABILITY__
+/* Runtime tagging is opt-in; the size classes are fixed at build time. */
+#    define JEMALLOC_MTE
+#  endif
 #endif
 #ifdef __mips__
 #ifdef __mips_n64

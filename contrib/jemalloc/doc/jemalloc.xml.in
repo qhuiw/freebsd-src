@@ -815,6 +815,17 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         build configuration.</para></listitem>
       </varlistentry>
 
+      <varlistentry id="config.mte">
+        <term>
+          <mallctl>config.mte</mallctl>
+          (<type>bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Whether the FreeBSD AArch64 MTE prototype was compiled
+        in. Such builds use 16-byte minimum size classes even when runtime
+        tagging is disabled.</para></listitem>
+      </varlistentry>
+
       <varlistentry id="config.lazy_lock">
         <term>
           <mallctl>config.lazy_lock</mallctl>
@@ -945,6 +956,28 @@ mallctl("arena." STRINGIFY(MALLCTL_ARENAS_ALL) ".decay",
         disabled by default unless <option>--enable-debug</option> is
         specified during configuration, in which case it is enabled by default.
         </para></listitem>
+      </varlistentry>
+
+      <varlistentry id="opt.mte">
+        <term>
+          <mallctl>opt.mte</mallctl>
+          (<type>bool</type>)
+          <literal>r-</literal>
+        </term>
+        <listitem><para>Enable the experimental FreeBSD AArch64 heap memory
+        tagging implementation. Disabled by default; enable at startup with
+        <envar>MALLOC_CONF</envar> set to <literal>mte:true</literal>. Requires
+        an MTE-capable kernel and FEAT_MTE2 or later. Initialization fails if
+        the requested support is unavailable. Tag checking is synchronous;
+        live allocations use tags 1 through 15 and free storage uses tag 0.
+        All usable bytes are tagged, including size-class rounding.</para>
+        <para>The prototype bypasses the special allocation/free fast paths,
+        implements reallocations by allocating, copying and freeing, and
+        leaves allocations unchanged on <function>xallocx</function>. It does
+        not support profiling, HPA, DSS, custom extent hooks, or arena reset
+        and destruction. Tag collisions on reuse and accesses within the
+        usable allocation remain possible. This is not a byte-precise bounds
+        checker.</para></listitem>
       </varlistentry>
 
       <varlistentry id="opt.cache_oblivious">

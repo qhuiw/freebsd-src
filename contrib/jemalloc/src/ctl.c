@@ -80,6 +80,7 @@ CTL_PROTO(thread_idle)
 CTL_PROTO(config_cache_oblivious)
 CTL_PROTO(config_debug)
 CTL_PROTO(config_fill)
+CTL_PROTO(config_mte)
 CTL_PROTO(config_lazy_lock)
 CTL_PROTO(config_malloc_conf)
 CTL_PROTO(config_opt_safety_checks)
@@ -122,6 +123,7 @@ CTL_PROTO(opt_stats_interval)
 CTL_PROTO(opt_stats_interval_opts)
 CTL_PROTO(opt_junk)
 CTL_PROTO(opt_zero)
+CTL_PROTO(opt_mte)
 CTL_PROTO(opt_utrace)
 CTL_PROTO(opt_xmalloc)
 CTL_PROTO(opt_experimental_infallible_new)
@@ -395,6 +397,7 @@ static const ctl_named_node_t	config_node[] = {
 	{NAME("cache_oblivious"), CTL(config_cache_oblivious)},
 	{NAME("debug"),		CTL(config_debug)},
 	{NAME("fill"),		CTL(config_fill)},
+	{NAME("mte"),		CTL(config_mte)},
 	{NAME("lazy_lock"),	CTL(config_lazy_lock)},
 	{NAME("malloc_conf"),	CTL(config_malloc_conf)},
 	{NAME("opt_safety_checks"),	CTL(config_opt_safety_checks)},
@@ -443,6 +446,7 @@ static const ctl_named_node_t opt_node[] = {
 	{NAME("stats_interval_opts"),	CTL(opt_stats_interval_opts)},
 	{NAME("junk"),		CTL(opt_junk)},
 	{NAME("zero"),		CTL(opt_zero)},
+	{NAME("mte"),		CTL(opt_mte)},
 	{NAME("utrace"),	CTL(opt_utrace)},
 	{NAME("xmalloc"),	CTL(opt_xmalloc)},
 	{NAME("experimental_infallible_new"),
@@ -2113,6 +2117,7 @@ label_return:
 CTL_RO_CONFIG_GEN(config_cache_oblivious, bool)
 CTL_RO_CONFIG_GEN(config_debug, bool)
 CTL_RO_CONFIG_GEN(config_fill, bool)
+CTL_RO_CONFIG_GEN(config_mte, bool)
 CTL_RO_CONFIG_GEN(config_lazy_lock, bool)
 CTL_RO_CONFIG_GEN(config_malloc_conf, const char *)
 CTL_RO_CONFIG_GEN(config_opt_safety_checks, bool)
@@ -2174,6 +2179,7 @@ CTL_RO_NL_GEN(opt_stats_interval, opt_stats_interval, int64_t)
 CTL_RO_NL_GEN(opt_stats_interval_opts, opt_stats_interval_opts, const char *)
 CTL_RO_NL_CGEN(config_fill, opt_junk, opt_junk, const char *)
 CTL_RO_NL_CGEN(config_fill, opt_zero, opt_zero, bool)
+CTL_RO_NL_GEN(opt_mte, opt_mte, bool)
 CTL_RO_NL_CGEN(config_utrace, opt_utrace, opt_utrace, bool)
 CTL_RO_NL_CGEN(config_xmalloc, opt_xmalloc, opt_xmalloc, bool)
 CTL_RO_NL_CGEN(config_enable_cxx, opt_experimental_infallible_new,
@@ -2661,6 +2667,10 @@ arena_reset_finish_background_thread(tsd_t *tsd, unsigned arena_ind) {
 static int
 arena_i_reset_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
     size_t *oldlenp, void *newp, size_t newlen) {
+	/* Bulk destruction bypasses per-object tag invalidation. */
+	if (opt_mte) {
+		return ENOTSUP;
+	}
 	int ret;
 	unsigned arena_ind;
 	arena_t *arena;
@@ -2681,6 +2691,9 @@ arena_i_reset_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
 static int
 arena_i_destroy_ctl(tsd_t *tsd, const size_t *mib, size_t miblen, void *oldp,
     size_t *oldlenp, void *newp, size_t newlen) {
+	if (opt_mte) {
+		return ENOTSUP;
+	}
 	int ret;
 	unsigned arena_ind;
 	arena_t *arena;
@@ -2881,6 +2894,10 @@ arena_i_muzzy_decay_ms_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
 static int
 arena_i_extent_hooks_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
     void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+	/* Custom mappings do not yet have an MTE allocation-tag contract. */
+	if (opt_mte && newp != NULL) {
+		return ENOTSUP;
+	}
 	int ret;
 	unsigned arena_ind;
 	arena_t *arena;
@@ -3101,6 +3118,10 @@ arenas_create_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
 	VERIFY_READ(unsigned);
 	arena_config_t config = arena_config_default;
 	WRITE(config.extent_hooks, extent_hooks_t *);
+	if (opt_mte && config.extent_hooks != &ehooks_default_extent_hooks) {
+		ret = ENOTSUP;
+		goto label_return;
+	}
 	if ((arena_ind = ctl_arena_init(tsd, &config)) == UINT_MAX) {
 		ret = EAGAIN;
 		goto label_return;
@@ -3125,6 +3146,10 @@ experimental_arenas_create_ext_ctl(tsd_t *tsd,
 	arena_config_t config = arena_config_default;
 	VERIFY_READ(unsigned);
 	WRITE(config, arena_config_t);
+	if (opt_mte && config.extent_hooks != &ehooks_default_extent_hooks) {
+		ret = ENOTSUP;
+		goto label_return;
+	}
 
 	if ((arena_ind = ctl_arena_init(tsd, &config)) == UINT_MAX) {
 		ret = EAGAIN;

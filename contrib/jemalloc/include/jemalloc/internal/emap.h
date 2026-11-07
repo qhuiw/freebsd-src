@@ -2,6 +2,7 @@
 #define JEMALLOC_INTERNAL_EMAP_H
 
 #include "jemalloc/internal/base.h"
+#include "jemalloc/internal/mte.h"
 #include "jemalloc/internal/rtree.h"
 
 /*
@@ -226,7 +227,8 @@ JEMALLOC_ALWAYS_INLINE edata_t *
 emap_edata_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr) {
 	EMAP_DECLARE_RTREE_CTX;
 
-	return rtree_read(tsdn, &emap->rtree, rtree_ctx, (uintptr_t)ptr).edata;
+	return rtree_read(tsdn, &emap->rtree, rtree_ctx,
+	    (uintptr_t)mte_untag(ptr)).edata;
 }
 
 /* Fills in alloc_ctx with the info in the map. */
@@ -236,7 +238,7 @@ emap_alloc_ctx_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
 	EMAP_DECLARE_RTREE_CTX;
 
 	rtree_metadata_t metadata = rtree_metadata_read(tsdn, &emap->rtree,
-	    rtree_ctx, (uintptr_t)ptr);
+	    rtree_ctx, (uintptr_t)mte_untag(ptr));
 	alloc_ctx->szind = metadata.szind;
 	alloc_ctx->slab = metadata.slab;
 }
@@ -248,7 +250,7 @@ emap_full_alloc_ctx_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
 	EMAP_DECLARE_RTREE_CTX;
 
 	rtree_contents_t contents = rtree_read(tsdn, &emap->rtree, rtree_ctx,
-	    (uintptr_t)ptr);
+	    (uintptr_t)mte_untag(ptr));
 	full_alloc_ctx->edata = contents.edata;
 	full_alloc_ctx->szind = contents.metadata.szind;
 	full_alloc_ctx->slab = contents.metadata.slab;
@@ -266,7 +268,7 @@ emap_full_alloc_ctx_try_lookup(tsdn_t *tsdn, emap_t *emap, const void *ptr,
 
 	rtree_contents_t contents;
 	bool err = rtree_read_independent(tsdn, &emap->rtree, rtree_ctx,
-	    (uintptr_t)ptr, &contents);
+	    (uintptr_t)mte_untag(ptr), &contents);
 	if (err) {
 		return true;
 	}
@@ -288,7 +290,7 @@ emap_alloc_ctx_try_lookup_fast(tsd_t *tsd, emap_t *emap, const void *ptr,
 
 	rtree_metadata_t metadata;
 	bool err = rtree_metadata_try_read_fast(tsd_tsdn(tsd), &emap->rtree,
-	    rtree_ctx, (uintptr_t)ptr, &metadata);
+	    rtree_ctx, (uintptr_t)mte_untag(ptr), &metadata);
 	if (err) {
 		return true;
 	}
@@ -332,7 +334,7 @@ emap_edata_lookup_batch(tsd_t *tsd, emap_t *emap, size_t nptrs,
 		 * the types.
 		 */
 		result[i].rtree_leaf = rtree_leaf_elm_lookup(tsd_tsdn(tsd),
-		    &emap->rtree, rtree_ctx, (uintptr_t)ptr,
+		    &emap->rtree, rtree_ctx, (uintptr_t)mte_untag(ptr),
 		    /* dependent */ true, /* init_missing */ false);
 	}
 

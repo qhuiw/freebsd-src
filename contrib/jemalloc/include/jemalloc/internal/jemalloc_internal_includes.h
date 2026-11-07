@@ -58,6 +58,7 @@
 /******************************************************************************/
 
 #include "jemalloc/internal/jemalloc_internal_externs.h"
+#include "jemalloc/internal/mte.h"
 #include "jemalloc/internal/arena_externs.h"
 #include "jemalloc/internal/large_externs.h"
 #include "jemalloc/internal/tcache_externs.h"

@@ -181,6 +181,8 @@ arena_salloc(tsdn_t *tsdn, const void *ptr) {
 
 JEMALLOC_ALWAYS_INLINE size_t
 arena_vsalloc(tsdn_t *tsdn, const void *ptr) {
+	/* The membership assertions below compare allocator-owned addresses. */
+	ptr = mte_untag(ptr);
 	/*
 	 * Return 0 if ptr is not within an extent managed by jemalloc.  This
 	 * function has two extra costs relative to isalloc():

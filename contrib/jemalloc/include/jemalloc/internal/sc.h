@@ -169,7 +169,12 @@
  * Size class N + (1 << SC_LG_NGROUP) twice the size of size class N.
  */
 #define SC_LG_NGROUP 2
+#ifdef JEMALLOC_MTE
+/* Independent allocations must never share an MTE tag granule. */
+#define SC_LG_TINY_MIN 4
+#else
 #define SC_LG_TINY_MIN 3
+#endif
 
 #if SC_LG_TINY_MIN == 0
 /* The div module doesn't support division by 1, which this would require. */

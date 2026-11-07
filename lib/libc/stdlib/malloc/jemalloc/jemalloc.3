@@ -768,6 +768,12 @@ config\&.fill (\fBbool\fR) r\-
 was specified during build configuration\&.
 .RE
 .PP
+config\&.mte (\fBbool\fR) r\-
+.RS 4
+Whether the FreeBSD AArch64 MTE prototype was compiled in\&. Such builds use
+16-byte minimum size classes even when runtime tagging is disabled\&.
+.RE
+.PP
 config\&.lazy_lock (\fBbool\fR) r\-
 .RS 4
 \fB\-\-enable\-lazy\-lock\fR
@@ -846,6 +852,23 @@ Abort\-on\-invalid\-configuration enabled/disabled\&. If true, invalid runtime o
 in these cases\&. This option is disabled by default unless
 \fB\-\-enable\-debug\fR
 is specified during configuration, in which case it is enabled by default\&.
+.RE
+.PP
+opt\&.mte (\fBbool\fR) r\-
+.RS 4
+Enable the experimental FreeBSD AArch64 heap memory tagging implementation\&.
+Disabled by default; enable at startup with MALLOC_CONF=mte:true\&. Requires
+an MTE-capable kernel and FEAT_MTE2 or later\&. Initialization fails if the
+requested support is unavailable\&. Tag checking is synchronous; live
+allocations use tags 1 through 15 and free storage uses tag 0\&. All usable
+bytes are tagged, including size-class rounding\&.
+.sp
+The prototype bypasses the special allocation/free fast paths, implements
+reallocations by allocating, copying and freeing, and leaves allocations
+unchanged on xallocx\&. It does not support profiling, HPA, DSS, custom extent
+hooks, or arena reset and destruction\&. Tag collisions on reuse and accesses
+within the usable allocation remain possible\&. This is not a byte-precise
+bounds checker\&.
 .RE
 .PP
 opt\&.cache_oblivious (\fBbool\fR) r\-

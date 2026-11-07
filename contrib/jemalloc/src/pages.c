@@ -31,8 +31,8 @@
 static size_t	os_page;
 
 #ifndef _WIN32
-#  define PAGES_PROT_COMMIT (PROT_READ | PROT_WRITE)
-#  define PAGES_PROT_DECOMMIT (PROT_NONE)
+#  define PAGES_PROT_COMMIT mte_prot(PROT_READ | PROT_WRITE)
+#  define PAGES_PROT_DECOMMIT mte_prot(PROT_NONE)
 static int	mmap_flags;
 #endif
 static bool	os_overcommits;
@@ -372,10 +372,10 @@ pages_mark_guards(void *head, void *tail) {
 	    (uintptr_t)head < (uintptr_t)tail);
 #ifdef JEMALLOC_HAVE_MPROTECT
 	if (head != NULL) {
-		mprotect(head, PAGE, PROT_NONE);
+		mprotect(head, PAGE, PAGES_PROT_DECOMMIT);
 	}
 	if (tail != NULL) {
-		mprotect(tail, PAGE, PROT_NONE);
+		mprotect(tail, PAGE, PAGES_PROT_DECOMMIT);
 	}
 #else
 	/* Decommit sets to PROT_NONE / MEM_DECOMMIT. */
@@ -406,13 +406,13 @@ pages_unmark_guards(void *head, void *tail) {
 	 */
 	bool ranged_mprotect = head_and_tail && range <= SC_LARGE_MINCLASS;
 	if (ranged_mprotect) {
-		mprotect(head, range, PROT_READ | PROT_WRITE);
+		mprotect(head, range, PAGES_PROT_COMMIT);
 	} else {
 		if (head != NULL) {
-			mprotect(head, PAGE, PROT_READ | PROT_WRITE);
+			mprotect(head, PAGE, PAGES_PROT_COMMIT);
 		}
 		if (tail != NULL) {
-			mprotect(tail, PAGE, PROT_READ | PROT_WRITE);
+			mprotect(tail, PAGE, PAGES_PROT_COMMIT);
 		}
 	}
 #else

@@ -257,6 +257,10 @@ malloc_initialized(void) {
 JEMALLOC_ALWAYS_INLINE void *
 imalloc_fastpath(size_t size, void *(fallback_alloc)(size_t)) {
 	LOG("core.malloc.entry", "size: %zu", size);
+	/* Tag each handoff in imalloc_body(), including tcache hits. */
+	if (unlikely(opt_mte)) {
+		return fallback_alloc(size);
+	}
 	if (tsd_get_allocates() && unlikely(!malloc_initialized())) {
 		return fallback_alloc(size);
 	}
