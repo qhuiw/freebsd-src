@@ -1,8 +1,8 @@
 # jemalloc MTE prototype review and guest tests
 
-This is source for a future FreeBSD AArch64 guest test. It has not been built
-or run as part of the implementation. Do not use host macOS execution to
-validate MTE faults.
+These tests target a FreeBSD AArch64 guest with the prototype libc. Do not
+use host macOS execution to validate MTE faults. The reported guest results
+and a kernel prerequisite are described below.
 
 ## Implementation contract
 
@@ -34,7 +34,8 @@ validate MTE faults.
 - The helper re-enables synchronous MTE via `ARM64_MTE_CTRL` before allocation
   tagging and pointer validation, preserving errno. There is intentionally no
   TLS cache of this state: this branch's kernel omits `SCTLR_ATA0` inheritance
-  in `mte_fork`/`mte_copy_thread`. No kernel/debugger sources are changed.
+  in `mte_fork`/`mte_copy_thread`. The allocator patch does not change
+  kernel/debugger sources; the separate fork fix below is a kernel prerequisite.
   The syscall on each operation is prototype overhead and may produce kernel
   diagnostic output with this kernel branch. Applications must not change the
   MTE control policy behind the allocator.
@@ -102,9 +103,57 @@ those runtime checks has been performed for this source-only change.
 
 ## Worktree and build isolation
 
-Keep the implementation in the `codex/jemalloc-mte` worktree for review. Do not
-point the existing cheribuild configuration at it or share its exact object
-directory. After review, transfer the allocator/build/test patch to the
-existing source checkout without overwriting unrelated debugger edits, then
-use that checkout's existing build environment for the libc rebuild. This
-worktree does not contain the debugger checkout's uncommitted changes.
+### Kernel prerequisite exposed by the guest test
+
+The first reported guest run passed with `MALLOC_CONF=mte:false`. With
+`MALLOC_CONF=mte:true`, the kernel panicked during fork before the test could
+complete.
+
+A guest panic reporting `invalid prot 21` in `pmap_protect()` during
+`vmspace_fork()` is a kernel protection-mask bug. The number is hexadecimal:
+`0x21` is `PROT_READ | PROT_MTE`. Fork removes `PROT_WRITE` to establish
+copy-on-write, but the arm64 assertion originally accepted only the ordinary
+read/write/execute bits. This happens at the first fork in
+`thread_and_fork()`, before the deliberate wrong-tag/use-after-free checks.
+
+The separate kernel fix allows `PROT_MTE` at this boundary and removes it
+from the local access-permission calculation. Existing PTE memory attributes
+remain unchanged. `PROT_NONE | PROT_MTE` must still remove the mapping;
+merely widening the assertion would leave that case readable.
+
+This fix requires rebuilding and booting the corrected `GENERIC-MTE` kernel.
+A libc-only rebuild or a fresh image containing the old kernel cannot fix
+the panic. The cheribuild configuration used for the allocator experiment
+has `skip-kernel` enabled; override that when preparing the corrected kernel.
+
+The `mmap__mte_fork` and `mmap__mte_prot_none_after_fork` cases in
+`tests/sys/vm/mmap_test.c` exercise this boundary independently of allocator
+tagging. After rebuilding that test and booting the corrected kernel, run:
+
+```sh
+env MALLOC_CONF=mte:false /usr/tests/sys/vm/mmap_test mmap__mte_fork
+env MALLOC_CONF=mte:false /usr/tests/sys/vm/mmap_test mmap__mte_prot_none_after_fork
+```
+
+The first checks fork and data copy-on-write isolation. The second requires
+`SIGSEGV/SEGV_ACCERR` when reading a populated copy-on-write mapping after
+`mprotect(PROT_NONE | PROT_MTE)`. Neither test verifies nonzero allocation-tag
+inheritance; rerun the jemalloc MTE tests for that coverage. These new kernel
+regressions have not yet been run in a guest.
+
+The repeated `writing new sctlr val` lines come from a debug `printf()` in
+`mte_sysarch_ctrl()`. The prototype's per-operation MTE control syscall makes
+that message frequent; it is separate from the protection-mask panic.
+
+### Allocator transfer
+
+The initial allocator patch and the kernel fork fix have been transferred
+from `codex/jemalloc-mte` to `/Users/qian/Desktop/m5/freebsd-src` on
+`mte-dev-new`. Make subsequent changes directly in that existing checkout,
+preserving unrelated debugger edits. The experimental worktree is no longer
+needed for development.
+
+Keep using the existing cheribuild source configuration and build directory.
+The libc rebuild has updated the shared staged root filesystem. The kernel
+fix still requires a kernel rebuild and a new guest boot before validation;
+a separate image filename does not isolate the shared staging directory.

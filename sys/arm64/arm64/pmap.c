@@ -4734,7 +4734,14 @@ pmap_protect(pmap_t pmap, vm_offset_t sva, vm_offset_t eva, vm_prot_t prot)
 	pt_entry_t mask, nbits;
 
 	PMAP_ASSERT_STAGE1(pmap);
-	KASSERT((prot & ~VM_PROT_ALL) == 0, ("invalid prot %x", prot));
+	KASSERT((prot & ~(VM_PROT_ALL | PROT_MTE)) == 0,
+	    ("invalid prot %x", prot));
+	/*
+	 * PROT_MTE selects a memory attribute in pmap_enter(), not an access
+	 * permission.  Preserve that attribute while restricting access, and
+	 * treat PROT_NONE | PROT_MTE as no access.
+	 */
+	prot &= ~PROT_MTE;
 	if (prot == VM_PROT_NONE) {
 		pmap_remove(pmap, sva, eva);
 		return;

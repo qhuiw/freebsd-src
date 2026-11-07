@@ -27,14 +27,22 @@
 #include <sys/param.h>
 #include <sys/mman.h>
 #include <sys/sysctl.h>
+#include <sys/wait.h>
+
+#ifdef PROT_MTE
+#include <sys/auxv.h>
+#include <machine/elf.h>
+#endif
 
 #include <atf-c.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define	MAP_AT_ZERO	"security.bsd.map_at_zero"
 
@@ -363,6 +371,104 @@ ATF_TC_BODY(mmap__maxprot_shm, tc)
 	ATF_REQUIRE(close(fd) == 0);
 }
 
+#ifdef PROT_MTE
+static volatile sig_atomic_t mte_fault_armed;
+
+static void *
+mte_mapping(size_t size)
+{
+	unsigned long hwcap2;
+	void *p;
+
+	ATF_REQUIRE(elf_aux_info(AT_HWCAP2, &hwcap2, sizeof(hwcap2)) == 0);
+	if ((hwcap2 & HWCAP2_MTE) == 0)
+		atf_tc_skip("MTE is not available");
+	p = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_MTE,
+	    MAP_ANON | MAP_PRIVATE, -1, 0);
+	ATF_REQUIRE(p != MAP_FAILED);
+	return (p);
+}
+
+static void
+mte_wait_child(pid_t child)
+{
+	pid_t waited;
+	int status;
+
+	do {
+		waited = waitpid(child, &status, 0);
+	} while (waited == -1 && errno == EINTR);
+	ATF_REQUIRE(waited == child);
+	ATF_REQUIRE_MSG(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+	    "child failed: wait status %#x", status);
+}
+
+ATF_TC_WITHOUT_HEAD(mmap__mte_fork);
+ATF_TC_BODY(mmap__mte_fork, tc)
+{
+	volatile unsigned char *p;
+	pid_t child;
+	int pagesize;
+
+	ATF_REQUIRE((pagesize = getpagesize()) > 0);
+	p = mte_mapping(pagesize);
+	/* Populate a writable PTE before fork write-protects the MTE mapping. */
+	p[0] = 0x42;
+	ATF_REQUIRE((child = fork()) != -1);
+	if (child == 0) {
+		if (p[0] != 0x42)
+			_exit(1);
+		p[0] = 0x24;
+		_exit(p[0] == 0x24 ? 0 : 2);
+	}
+	mte_wait_child(child);
+	ATF_CHECK_EQ(p[0], 0x42);
+	ATF_REQUIRE(munmap((void *)p, pagesize) == 0);
+}
+
+static void
+mte_protection_fault(int sig, siginfo_t *info, void *context)
+{
+
+	(void)context;
+	_exit(mte_fault_armed && sig == SIGSEGV &&
+	    info->si_code == SEGV_ACCERR ? 0 : 3);
+}
+
+ATF_TC_WITHOUT_HEAD(mmap__mte_prot_none_after_fork);
+ATF_TC_BODY(mmap__mte_prot_none_after_fork, tc)
+{
+	struct sigaction action = {0};
+	volatile unsigned char *p;
+	pid_t child;
+	int pagesize;
+
+	ATF_REQUIRE((pagesize = getpagesize()) > 0);
+	p = mte_mapping(pagesize);
+	p[0] = 0x42;
+	ATF_REQUIRE((child = fork()) != -1);
+	if (child == 0) {
+		action.sa_sigaction = mte_protection_fault;
+		action.sa_flags = SA_SIGINFO;
+		sigemptyset(&action.sa_mask);
+		if (sigaction(SIGSEGV, &action, NULL) == -1)
+			_exit(1);
+		/* Keep MAP_ENTRY_COW and populate the child's read-only PTE. */
+		if (p[0] != 0x42)
+			_exit(2);
+		if (mprotect((void *)p, pagesize, PROT_NONE | PROT_MTE) == -1)
+			_exit(4);
+		mte_fault_armed = 1;
+		(void)p[0];
+		mte_fault_armed = 0;
+		_exit(5);
+	}
+	mte_wait_child(child);
+	ATF_CHECK_EQ(p[0], 0x42);
+	ATF_REQUIRE(munmap((void *)p, pagesize) == 0);
+}
+#endif
+
 ATF_TP_ADD_TCS(tp)
 {
 	ATF_TP_ADD_TC(tp, mmap__map_at_zero);
@@ -372,6 +478,10 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, mmap__write_only);
 	ATF_TP_ADD_TC(tp, mmap__maxprot_basic);
 	ATF_TP_ADD_TC(tp, mmap__maxprot_shm);
+#ifdef PROT_MTE
+	ATF_TP_ADD_TC(tp, mmap__mte_fork);
+	ATF_TP_ADD_TC(tp, mmap__mte_prot_none_after_fork);
+#endif
 
 	return (atf_no_error());
 }
