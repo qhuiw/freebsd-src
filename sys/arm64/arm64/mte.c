@@ -133,7 +133,6 @@ mte_sysarch_ctrl(struct thread *td, uint64_t flags)
 	mte_update_sctlr(td, sctlr);
 
 	if (td == curthread) {
-		printf("writing new sctlr val: 0x%lx\n", sctlr);
 		WRITE_SPECIALREG(sctlr_el1,
 		    (READ_SPECIALREG(sctlr_el1) & ~SCTLR_USER_MASK) | sctlr);
 		WRITE_SPECIALREG(GCR_EL1_REG, td->td_md.md_gcr);
@@ -506,8 +505,9 @@ mte_fork(struct thread *new_td, struct thread *orig_td)
 	if (!MTE_HAS_TAG_CHECK)
 		return;
 
+	/* Preserve allocation-tag access as well as the tag-check mode. */
 	mte_update_sctlr(new_td,
-	    orig_td->td_md.md_sctlr & SCTLR_TCF0_MASK);
+	    orig_td->td_md.md_sctlr & (SCTLR_ATA0 | SCTLR_TCF0_MASK));
 	new_td->td_md.md_gcr = orig_td->td_md.md_gcr;
 }
 
@@ -527,8 +527,9 @@ mte_copy_thread(struct thread *new_td, struct thread *orig_td)
 	if (!MTE_HAS_TAG_CHECK)
 		return;
 
+	/* Preserve allocation-tag access as well as the tag-check mode. */
 	mte_update_sctlr(new_td,
-	    orig_td->td_md.md_sctlr & SCTLR_TCF0_MASK);
+	    orig_td->td_md.md_sctlr & (SCTLR_ATA0 | SCTLR_TCF0_MASK));
 	new_td->td_md.md_gcr = orig_td->td_md.md_gcr;
 }
 

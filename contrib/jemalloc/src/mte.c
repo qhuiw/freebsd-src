@@ -26,10 +26,11 @@ mte_pointer_tag(const void *ptr) {
 }
 
 /*
- * Reapply the per-thread controls before using tag instructions.  In this
- * kernel branch fork/thread creation does not inherit SCTLR_ATA0.  Avoid a TLS
- * "already enabled" flag, which would also be inherited across fork.  This is
- * intentionally a syscall per operation in the initial prototype.
+ * Reapply the allocator's synchronous policy before using tag instructions.
+ * Keep this conservative path for kernels predating the SCTLR_ATA0 thread
+ * inheritance fix.  fork() already inherits the complete saved md_sctlr in
+ * cpu_fork().  Caching these controls is a separate optimization; the initial
+ * prototype intentionally makes a syscall per operation.
  */
 static bool
 mte_thread_enable(void) {
