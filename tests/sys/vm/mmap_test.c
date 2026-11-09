@@ -406,12 +406,14 @@ mte_wait_child(pid_t child)
 ATF_TC_WITHOUT_HEAD(mmap__mte_fork);
 ATF_TC_BODY(mmap__mte_fork, tc)
 {
+	void *mapping;
 	volatile unsigned char *p;
 	pid_t child;
 	int pagesize;
 
 	ATF_REQUIRE((pagesize = getpagesize()) > 0);
-	p = mte_mapping(pagesize);
+	mapping = mte_mapping(pagesize);
+	p = mapping;
 	/* Populate a writable PTE before fork write-protects the MTE mapping. */
 	p[0] = 0x42;
 	ATF_REQUIRE((child = fork()) != -1);
@@ -423,7 +425,7 @@ ATF_TC_BODY(mmap__mte_fork, tc)
 	}
 	mte_wait_child(child);
 	ATF_CHECK_EQ(p[0], 0x42);
-	ATF_REQUIRE(munmap((void *)p, pagesize) == 0);
+	ATF_REQUIRE(munmap(mapping, pagesize) == 0);
 }
 
 static void
@@ -439,12 +441,14 @@ ATF_TC_WITHOUT_HEAD(mmap__mte_prot_none_after_fork);
 ATF_TC_BODY(mmap__mte_prot_none_after_fork, tc)
 {
 	struct sigaction action = {0};
+	void *mapping;
 	volatile unsigned char *p;
 	pid_t child;
 	int pagesize;
 
 	ATF_REQUIRE((pagesize = getpagesize()) > 0);
-	p = mte_mapping(pagesize);
+	mapping = mte_mapping(pagesize);
+	p = mapping;
 	p[0] = 0x42;
 	ATF_REQUIRE((child = fork()) != -1);
 	if (child == 0) {
@@ -456,7 +460,7 @@ ATF_TC_BODY(mmap__mte_prot_none_after_fork, tc)
 		/* Keep MAP_ENTRY_COW and populate the child's read-only PTE. */
 		if (p[0] != 0x42)
 			_exit(2);
-		if (mprotect((void *)p, pagesize, PROT_NONE | PROT_MTE) == -1)
+		if (mprotect(mapping, pagesize, PROT_NONE | PROT_MTE) == -1)
 			_exit(4);
 		mte_fault_armed = 1;
 		(void)p[0];
@@ -465,7 +469,7 @@ ATF_TC_BODY(mmap__mte_prot_none_after_fork, tc)
 	}
 	mte_wait_child(child);
 	ATF_CHECK_EQ(p[0], 0x42);
-	ATF_REQUIRE(munmap((void *)p, pagesize) == 0);
+	ATF_REQUIRE(munmap(mapping, pagesize) == 0);
 }
 #endif
 

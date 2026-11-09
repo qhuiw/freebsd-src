@@ -1,3 +1,6 @@
+PACKAGE=	tests
+BINDIR=	/usr/tests/lib/libc/stdlib
+
 PROG=	jemalloc_mte_test
 SRCS=	jemalloc_mte_test.c
 MAN=
